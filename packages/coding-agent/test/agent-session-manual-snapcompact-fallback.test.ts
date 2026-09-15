@@ -43,7 +43,7 @@ describe("AgentSession manual snapcompact text-only fallback", () => {
 		}
 	});
 
-	async function createHarness(): Promise<{
+	async function createHarness(visionRole?: string): Promise<{
 		session: AgentSession;
 		sessionManager: SessionManager;
 		activeModel: Model;
@@ -63,7 +63,9 @@ describe("AgentSession manual snapcompact text-only fallback", () => {
 		});
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		const seed: Message[] = [
-			{ role: "user", content: "first question", timestamp: Date.now() },
+			// Archivable history must outweigh the frame projection (~5k tokens per
+			// frame) or snapcompact legitimately declines: "would not reduce context".
+			{ role: "user", content: `first question ${"alpha ".repeat(30000)}`, timestamp: Date.now() },
 			{
 				role: "assistant",
 				content: [{ type: "text", text: "first answer" }],
@@ -89,6 +91,7 @@ describe("AgentSession manual snapcompact text-only fallback", () => {
 		const settings = Settings.isolated({
 			"compaction.methodOrder": ["snapcompact", "soft"],
 			"compaction.keepRecentTokens": 1,
+			...(visionRole === undefined ? {} : { modelRoles: { vision: visionRole } }),
 		});
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
 		const notices: string[] = [];
@@ -137,8 +140,32 @@ describe("AgentSession manual snapcompact text-only fallback", () => {
 		// Explicit no-LLM request must never reach the provider-backed summarizer.
 		expect(compactSpy).not.toHaveBeenCalled();
 		expect(harness.notices).toContain(
-			`snapcompact needs a vision-capable model (${harness.activeModel.id} is text-only)`,
+			`snapcompact needs a vision-capable model (${harness.activeModel.id} is text-only). Configure a vision-capable model for modelRoles.vision.`,
 		);
 		expect(harness.sessionManager.getBranch().find(entry => entry.type === "compaction")).toBeUndefined();
+	});
+
+	it("runs the local vision-reader pass and switches the session when modelRoles.vision is configured", async () => {
+		const harness = await createHarness("aimlapi/claude-sonnet-4-5-20250929");
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => ({
+			summary: "llm summary",
+			shortSummary: "llm",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: 42,
+			details: { provider: model.provider, model: model.id },
+		}));
+		await harness.session.compact();
+
+		// The configured reader replaces the text-only local blocker: the pass
+		// lands natively, never through the LLM summarizer.
+		expect(compactSpy).not.toHaveBeenCalled();
+		expect(harness.sessionManager.getBranch().find(entry => entry.type === "compaction")).toBeDefined();
+		// Switch-on-success: the committed archive is only readable by the reader.
+		expect(harness.session.model?.id).toBe("claude-sonnet-4-5-20250929");
+		const lastModelChange = harness.sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "model_change")
+			.at(-1);
+		expect(lastModelChange).toMatchObject({ model: "aimlapi/claude-sonnet-4-5-20250929", role: "vision" });
 	});
 });

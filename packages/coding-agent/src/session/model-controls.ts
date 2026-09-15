@@ -259,12 +259,16 @@ export class ModelControls {
 	 * Validates that a credential source is configured (synchronously, without
 	 * refreshing OAuth or running command-backed key programs), saves to session
 	 * log but NOT to settings.
+	 * `role` overrides the role recorded on the model-change entry (e.g. snapcompact's
+	 * `vision` fallback switch); it wins over the ephemeral/temporary default.
+	 * Post-mutation failures (provider-state reconcile, prompt refresh) are
+	 * logged, never thrown — a rejection means the active model did not change (side-state clears like the suppressed selector may already have run).
 	 * @throws Error if no API key available for the model
 	 */
 	async setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
-		options?: { ephemeral?: boolean },
+		options?: { ephemeral?: boolean; role?: string },
 	): Promise<void> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		if (!this.#host.modelRegistry.hasConfiguredAuth(model)) {
@@ -278,7 +282,7 @@ export class ModelControls {
 		await this.#host.setModelWithProviderSessionReset(targetModel);
 		this.#host.sessionManager.appendModelChange(
 			`${targetModel.provider}/${targetModel.id}`,
-			options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
+			options?.role ?? (options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary"),
 		);
 		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
 
@@ -289,7 +293,19 @@ export class ModelControls {
 		} else {
 			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
 		}
-		await this.#host.syncAfterModelChange(previousEditMode);
+		// The model switch itself succeeded; a prompt-refresh failure leaves a
+		// degraded system prompt, not a half-switched session. Callers rely on a
+		// rejection meaning "nothing changed" (the auth pre-check and metadata
+		// refresh are the only throwers, both before setModelWithProviderSessionReset,
+		// so a rejection leaves the active model unchanged), so swallow sync errors here.
+		try {
+			await this.#host.syncAfterModelChange(previousEditMode);
+		} catch (error) {
+			logger.warn("setModelTemporary: post-switch prompt sync failed", {
+				model: `${targetModel.provider}/${targetModel.id}`,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 
 	/**

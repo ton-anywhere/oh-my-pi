@@ -60,11 +60,15 @@ export interface CompactionBoundaries {
  * when compaction is disabled/off or the window is unknown — the gauge then
  * renders without markers. `model` resolves which configured method a real
  * pass would run; without it, model-gated methods count as unavailable.
+ * `snapcompactVisionFallback` MUST mirror the engine's availability arm: a
+ * text-only `model` with a usable `modelRoles.vision` reader makes snapcompact
+ * the first available method, which suppresses soft speculation.
  */
 export function computeCompactionBoundaries(
 	settings: AgentSession["settings"],
 	contextWindow: number,
 	model?: Model | null,
+	snapcompactVisionFallback = false,
 ): CompactionBoundaries | null {
 	if (!(contextWindow > 0)) return null;
 	const configured = settings.getGroup("compaction");
@@ -72,7 +76,9 @@ export function computeCompactionBoundaries(
 	if (!configured.enabled || compactionSettings.strategy === "off") return null;
 	const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
 	if (!(thresholdTokens > 0) || thresholdTokens > contextWindow) return null;
-	const speculates = configured.asyncEnabled !== false && resolveSpeculationMethod(model, configured) !== undefined;
+	const speculates =
+		configured.asyncEnabled !== false &&
+		resolveSpeculationMethod(model, configured, snapcompactVisionFallback) !== undefined;
 	const leadTokens = resolveSpeculationLeadTokens(thresholdTokens);
 	return {
 		thresholdPercent: (thresholdTokens / contextWindow) * 100,

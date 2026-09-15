@@ -97,6 +97,7 @@ import {
 	resolveCompactionConfiguredTarget,
 	resolveContextPromotionConfiguredTarget,
 	resolveRoleModelFull,
+	resolveSnapcompactVisionModel,
 } from "./role-models";
 import type { SessionContext } from "./session-context";
 import { buildSessionContext, getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
@@ -159,6 +160,10 @@ function hasConfiguredCompactionMethod(settings: ConfiguredCompactionSettings): 
  * of what a byte/payload-limit 413 recovery needs — a request already rejected
  * for being too large in bytes should not be retried with an even larger,
  * media-heavy one (#11482).
+ *
+ * `snapcompactVisionFallback` marks that `modelRoles.vision` resolves a reader for the
+ * frame archive even though `model` itself is text-only, keeping snapcompact selectable
+ * (the pass runs on that reader and switches the session to it on success).
  */
 function isCompactionMethodUsable(
 	candidate: CompactionMethod,
@@ -166,11 +171,12 @@ function isCompactionMethodUsable(
 	model: Model | undefined,
 	settings: ConfiguredCompactionSettings,
 	excludeMedia = false,
+	snapcompactVisionFallback = false,
 ): boolean {
 	return candidate === "remote"
 		? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate))
 		: candidate === "snapcompact"
-			? !excludeMedia && model?.input.includes("image") === true
+			? !excludeMedia && (model?.input.includes("image") === true || snapcompactVisionFallback)
 			: candidate === "handoff"
 				? reason !== "overflow"
 				: true;
@@ -189,9 +195,10 @@ function hasUsableCompactionMethod(
 	model: Model | undefined,
 	settings: ConfiguredCompactionSettings,
 	excludeMedia = false,
+	snapcompactVisionFallback = false,
 ): boolean {
 	return resolveCompactionMethodOrder(settings.methodOrder).some(candidate =>
-		isCompactionMethodUsable(candidate, reason, model, settings, excludeMedia),
+		isCompactionMethodUsable(candidate, reason, model, settings, excludeMedia, snapcompactVisionFallback),
 	);
 }
 
@@ -465,7 +472,7 @@ export interface SessionMaintenanceHost {
 	setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
-		options?: { ephemeral?: boolean },
+		options?: { ephemeral?: boolean; role?: string },
 	): Promise<void>;
 	abort(options?: {
 		goalReason?: "interrupted" | "internal";
@@ -1087,6 +1094,13 @@ export class SessionMaintenance {
 			const compactionSettings = this.#host.settings.getGroup("compaction");
 			methods = resolveCompactionMethodOrder(compactMode?.overrides.methodOrder ?? compactionSettings.methodOrder);
 			const explicitSnapcompact = compactMode?.name === "snapcompact";
+			// A text-only active model cannot read snapcompact's PNG frames (outbound
+			// conversion silently drops image blocks), so the configured
+			// `modelRoles.vision` model — never @default or first-available — becomes
+			// the reader for the pass; the session switches to it on success.
+			const snapcompactVisionFallback = activeModel.input.includes("image")
+				? undefined
+				: resolveSnapcompactVisionModel(this.#host.settings, this.#host.modelRegistry, activeModel);
 			let selectedMethod: CompactionMethod | undefined;
 			for (let index = methodOffset; index < methods.length; index++) {
 				const method = methods[index];
@@ -1101,7 +1115,9 @@ export class SessionMaintenance {
 				if (method === "snapcompact") {
 					if (
 						explicitSnapcompact ||
-						(!customInstructions && !options?.internalGuidance && activeModel.input.includes("image"))
+						(!customInstructions &&
+							!options?.internalGuidance &&
+							(activeModel.input.includes("image") || snapcompactVisionFallback !== undefined))
 					) {
 						selectedMethod = method;
 						selectedMethodIndex = index;
@@ -1189,19 +1205,26 @@ export class SessionMaintenance {
 			const snapcompactReady = wantsSnapcompact;
 			const snapcompactShapeSetting = this.#host.settings.get("snapcompact.shape");
 			let snapcompactShape: snapcompact.Shape | undefined;
+			// The reader — the model that renders and re-reads the frames — is the
+			// active model when it accepts images, else the vision-role fallback.
+			const snapcompactReader = activeModel.input.includes("image") ? activeModel : snapcompactVisionFallback;
+			if (wantsSnapcompact && !snapcompactReader) {
+				this.#host.emitNotice(
+					"warning",
+					`snapcompact needs a vision-capable model (${activeModel.id} is text-only). Configure a vision-capable model for modelRoles.vision.`,
+					"compaction",
+				);
+				throw new Error(
+					`snapcompact cannot run locally: ${activeModel.id} is text-only. Configure a vision-capable model for modelRoles.vision.`,
+				);
+			}
 			// Claude refuses inputs that reproduce its own reasoning as text
 			// ("reasoning_extraction"), and the snapcompact archive is replayed as
 			// text into every later request; drop `¶think:` sections for
-			// Anthropic-dialect targets (issue #6093).
-			const snapcompactIncludeThinking = preferredDialect(this.#model.id) !== "anthropic";
-			if (wantsSnapcompact && !this.#model.input.includes("image")) {
-				this.#host.emitNotice(
-					"warning",
-					`snapcompact needs a vision-capable model (${this.#model.id} is text-only)`,
-					"compaction",
-				);
-				throw new Error(`snapcompact cannot run locally: ${this.#model.id} is text-only.`);
-			} else if (snapcompactReady) {
+			// Anthropic-dialect targets (issue #6093). The dialect keys off the
+			// reader: it is the model that will re-read the archive.
+			const snapcompactIncludeThinking = preferredDialect((snapcompactReader ?? activeModel).id) !== "anthropic";
+			if (snapcompactReady && snapcompactReader) {
 				const text = snapcompact.serializeConversation(
 					convertToLlm(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)),
 					{ includeThinking: snapcompactIncludeThinking },
@@ -1211,7 +1234,7 @@ export class SessionMaintenance {
 					preparation.previousPreserveData,
 					preparation.previousSummary,
 				);
-				snapcompactShape = snapcompact.resolveShapeForText(probeText, this.#model, snapcompactShapeSetting);
+				snapcompactShape = snapcompact.resolveShapeForText(probeText, snapcompactReader, snapcompactShapeSetting);
 				const renderScan = snapcompact.scanRenderability(probeText, { shape: snapcompactShape });
 				if (!renderScan.isSafe) {
 					const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
@@ -1238,8 +1261,8 @@ export class SessionMaintenance {
 			// fits without the warning loop (issue #3247). A local blocker rejects
 			// this method, allowing the configured preference order to continue.
 			let snapcompactResult: snapcompact.CompactionResult | undefined;
-			if (snapcompactReady) {
-				const maxFrames = this.#computeSnapcompactMaxFrames(preparation, effectiveSettings);
+			if (snapcompactReady && snapcompactReader) {
+				const maxFrames = this.#computeSnapcompactMaxFrames(preparation, effectiveSettings, snapcompactReader);
 				if (maxFrames < 1) {
 					logger.warn("Snapcompact skipped: kept history alone exceeds the context budget", {
 						model: this.#model?.id,
@@ -1257,7 +1280,7 @@ export class SessionMaintenance {
 					}
 					snapcompactResult = await snapcompact.compact(preparation, {
 						convertToLlm,
-						model: this.#model,
+						model: snapcompactReader,
 						...(snapcompactShapeSetting === "auto" ? {} : { shape }),
 						maxFrames,
 						includeThinking: snapcompactIncludeThinking,
@@ -1278,7 +1301,7 @@ export class SessionMaintenance {
 							"snapcompact cannot run locally: standing image payload exceeds the per-request budget.",
 						);
 					}
-					const ctxWindow = this.#model?.contextWindow ?? 0;
+					const ctxWindow = snapcompactReader.contextWindow ?? 0;
 					const budget =
 						ctxWindow > 0
 							? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
@@ -1391,6 +1414,33 @@ export class SessionMaintenance {
 				throw new CompactionCancelledError(undefined, {
 					cause: compactionAbortController.signal.reason,
 				});
+			}
+
+			// Switch-on-success invariant: the committed frame archive is only
+			// readable by the reader, so the session must already run the reader
+			// when the compaction entry lands. Every local blocker threw above,
+			// before any switch; a failed switch throws here — before
+			// `compactionCommitted` flips — so the retry catch below keeps walking
+			// the method order and the session is never left switched to a model
+			// whose entry it could not read (the catch now only guards
+			// pre-switch failures (auth check, metadata refresh)). Settings are never mutated.
+			if (snapcompactResult && snapcompactReader && snapcompactReader !== activeModel) {
+				try {
+					await this.#host.setModelTemporary(snapcompactReader, undefined, { role: "vision" });
+					this.#host.emitNotice(
+						"warning",
+						`snapcompact: switched active model to ${snapcompactReader.provider}/${snapcompactReader.id} (vision role) — ${activeModel.id} cannot read image frames`,
+						"compaction",
+					);
+				} catch (error) {
+					const reason = error instanceof Error ? error.message : String(error);
+					this.#host.emitNotice(
+						"warning",
+						`snapcompact could not switch the session to ${snapcompactReader.provider}/${snapcompactReader.id} (vision role): ${reason}`,
+						"compaction",
+					);
+					throw error;
+				}
 			}
 
 			markCommitted();
@@ -1997,7 +2047,12 @@ export class SessionMaintenance {
 		}
 		const model = this.#model;
 		if (!model) return;
-		const method = resolveSpeculationMethod(model, settings);
+		// A text-only active model still speculates snapcompact when the vision
+		// role can read the frames (mirrors the auto-path availability arm).
+		const snapcompactVisionFallback =
+			!model.input.includes("image") &&
+			resolveSnapcompactVisionModel(this.#host.settings, this.#host.modelRegistry, model) !== undefined;
+		const method = resolveSpeculationMethod(model, settings, snapcompactVisionFallback);
 		if (!method) return;
 		this.#startSpeculationRun(contextTokens, method);
 	}
@@ -2043,7 +2098,10 @@ export class SessionMaintenance {
 		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return false;
 		const model = this.#model;
 		if (!model) return false;
-		const method = resolveSpeculationMethod(model, settings);
+		const snapcompactVisionFallback =
+			!model.input.includes("image") &&
+			resolveSnapcompactVisionModel(this.#host.settings, this.#host.modelRegistry, model) !== undefined;
+		const method = resolveSpeculationMethod(model, settings, snapcompactVisionFallback);
 		if (!method) return false;
 		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
 		const graceCapTokens = Math.min(
@@ -2721,6 +2779,13 @@ export class SessionMaintenance {
 		// (Named distinctly from the `compactionSettings` used further down in
 		// this function's later, unrelated threshold check.)
 		const payloadCompactionSettings = this.#host.settings.getGroup("compaction");
+		// The `modelRoles.vision` reader keeps snapcompact selectable on a text-only
+		// active model — mirrors the availability arm of `runAutoCompaction`'s
+		// method-order loop (moot when `excludeMediaForPayloadRejection` is set:
+		// snapcompact is excluded there regardless of the reader).
+		const payloadSnapcompactVisionFallback =
+			this.#model?.input.includes("image") !== true &&
+			resolveSnapcompactVisionModel(this.#host.settings, this.#host.modelRegistry, this.#model) !== undefined;
 		const compactionAvailable =
 			payloadCompactionSettings.enabled &&
 			(this.#usesExperimentalContextManagement() ||
@@ -2729,6 +2794,7 @@ export class SessionMaintenance {
 					this.#model,
 					payloadCompactionSettings,
 					excludeMediaForPayloadRejection,
+					payloadSnapcompactVisionFallback,
 				));
 		// Unknown context window (common for custom/self-hosted models the
 		// registry has no metadata for) used to be treated the same as a
@@ -3400,13 +3466,20 @@ export class SessionMaintenance {
 	 * ~402k frame-token projection always overflows any sub-1M-token window
 	 * (issue #3247).
 	 */
-	#computeSnapcompactMaxFrames(preparation: CompactionPreparation, settings: EngineCompactionSettings): number {
-		const ctxWindow = this.#model?.contextWindow ?? 0;
+	#computeSnapcompactMaxFrames(
+		preparation: CompactionPreparation,
+		settings: EngineCompactionSettings,
+		readerModel: Model,
+	): number {
+		// Every window/provider input below keys off the reader — the model that
+		// renders and re-reads the frames — not the session's active model, which
+		// may be a text-only `modelRoles.vision` fallback caller.
+		const ctxWindow = readerModel.contextWindow ?? 0;
 		if (ctxWindow <= 0) {
 			return Math.min(
 				snapcompact.MAX_FRAMES_DEFAULT,
 				snapcompact.maxFramesForDataBudget(),
-				snapcompact.providerFrameBudget(this.#model?.provider),
+				snapcompact.providerFrameBudget(readerModel.provider),
 			);
 		}
 		const reserve = effectiveReserveTokens(ctxWindow, settings);
@@ -3438,7 +3511,7 @@ export class SessionMaintenance {
 		//   drift on denser content (e.g. dense JSON / tool-result blobs).
 		// - Summary template (intro + FILES section + grid notes) bills
 		//   ~2k tokens for typical sessions.
-		const shape = snapcompact.resolveShape(this.#model, this.#host.settings.get("snapcompact.shape"));
+		const shape = snapcompact.resolveShape(readerModel, this.#host.settings.get("snapcompact.shape"));
 		const edgeCap = snapcompact.geometry(shape).capacity;
 		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
 		const SUMMARY_TEMPLATE_TOKENS = 2000;
@@ -3449,7 +3522,7 @@ export class SessionMaintenance {
 			Math.floor(frameBudget / snapcompact.FRAME_TOKEN_ESTIMATE),
 			snapcompact.MAX_FRAMES_DEFAULT,
 			snapcompact.maxFramesForDataBudget(),
-			snapcompact.providerFrameBudget(this.#model?.provider),
+			snapcompact.providerFrameBudget(readerModel.provider),
 		);
 	}
 
@@ -3785,19 +3858,24 @@ export class SessionMaintenance {
 	 * Returns 0 when not even one frame fits that budget — the rebuild could
 	 * never create headroom, so the caller must not append it.
 	 */
-	#computeSnapcompactRescueMaxFrames(settings: EngineCompactionSettings, keptTailTokens: number): number {
-		const ctxWindow = this.#model?.contextWindow ?? 0;
+	#computeSnapcompactRescueMaxFrames(
+		settings: EngineCompactionSettings,
+		keptTailTokens: number,
+		readerModel: Model,
+	): number {
+		// Window/provider inputs key off the reader, matching #computeSnapcompactMaxFrames.
+		const ctxWindow = readerModel.contextWindow ?? 0;
 		if (ctxWindow <= 0) {
 			return Math.min(
 				snapcompact.MAX_FRAMES_DEFAULT,
 				snapcompact.maxFramesForDataBudget(),
-				snapcompact.providerFrameBudget(this.#model?.provider),
+				snapcompact.providerFrameBudget(readerModel.provider),
 			);
 		}
 		const thresholdTokens = resolveThresholdTokens(ctxWindow, settings);
 		const recoveryBandTokens = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
 		const baseTokens = computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer);
-		const shape = snapcompact.resolveShape(this.#model, this.#host.settings.get("snapcompact.shape"));
+		const shape = snapcompact.resolveShape(readerModel, this.#host.settings.get("snapcompact.shape"));
 		const edgeCap = snapcompact.geometry(shape).capacity;
 		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
 		const SUMMARY_TEMPLATE_TOKENS = 2000;
@@ -3811,7 +3889,7 @@ export class SessionMaintenance {
 			Math.floor(frameBudget / snapcompact.FRAME_TOKEN_ESTIMATE),
 			snapcompact.MAX_FRAMES_DEFAULT,
 			snapcompact.maxFramesForDataBudget(),
-			snapcompact.providerFrameBudget(this.#model?.provider),
+			snapcompact.providerFrameBudget(readerModel.provider),
 		);
 	}
 
@@ -3841,9 +3919,12 @@ export class SessionMaintenance {
 		signal: AbortSignal,
 	): Promise<snapcompact.CompactionResult | undefined> {
 		if (signal.aborted) return undefined;
-		// Re-rendering frames needs a vision-capable model, same gate as the
-		// snapcompact method.
-		if (!this.#model?.input.includes("image")) return undefined;
+		// Re-rendering frames needs a model that can read them: the active model
+		// when it accepts images, else the configured `modelRoles.vision` model.
+		const readerModel = this.#model?.input.includes("image")
+			? this.#model
+			: resolveSnapcompactVisionModel(this.#host.settings, this.#host.modelRegistry, this.#model);
+		if (!readerModel) return undefined;
 		const staleEntry = getLatestCompactionEntry(branchEntries);
 		if (!staleEntry) return undefined;
 		// Only rescue when the archive is the actual source of the overflow.
@@ -3875,7 +3956,7 @@ export class SessionMaintenance {
 		if (!archive || archive.frames.length <= 1) return undefined;
 		const archiveText = snapcompact.archiveSourceText(archive);
 		if (!archiveText) return undefined;
-		const maxFrames = this.#computeSnapcompactRescueMaxFrames(settings, keptTailTokens);
+		const maxFrames = this.#computeSnapcompactRescueMaxFrames(settings, keptTailTokens, readerModel);
 		if (maxFrames < 1 || maxFrames >= archive.frames.length) return undefined;
 
 		const staleDetails = staleEntry.details as snapcompact.CompactionDetails | undefined;
@@ -3883,7 +3964,7 @@ export class SessionMaintenance {
 		for (const file of staleDetails?.readFiles ?? []) fileOps.read.add(file);
 		for (const file of staleDetails?.modifiedFiles ?? []) fileOps.edited.add(file);
 		const shapeSetting = this.#host.settings.get("snapcompact.shape");
-		const shape = snapcompact.resolveShapeForText(archiveText, this.#model, shapeSetting);
+		const shape = snapcompact.resolveShapeForText(archiveText, readerModel, shapeSetting);
 		let result: snapcompact.CompactionResult;
 		try {
 			result = await snapcompact.compact(
@@ -3898,7 +3979,7 @@ export class SessionMaintenance {
 				},
 				{
 					convertToLlm,
-					model: this.#model,
+					model: readerModel,
 					...(shapeSetting === "auto" ? {} : { shape }),
 					maxFrames,
 				},
@@ -3912,6 +3993,32 @@ export class SessionMaintenance {
 		if (signal.aborted) return undefined;
 		const rebuilt = snapcompact.getPreservedArchive(result.preserveData);
 		if (!rebuilt || rebuilt.frames.length >= archive.frames.length) return undefined;
+
+		// Switch-on-success invariant: the rebuilt archive is only readable by the
+		// reader, so the session must run it before the entry is appended. A failed
+		// switch aborts the rescue WITHOUT appending (the session stays exactly as
+		// unswitched as when the rebuild bailed; the next resume may retry), so the
+		// session is never left on a model whose entry it could not read (the
+		// catch now only guards pre-switch failures (auth check, metadata refresh)).
+		if (readerModel !== this.#model) {
+			const previousModelId = this.#model?.id;
+			try {
+				await this.#host.setModelTemporary(readerModel, undefined, { role: "vision" });
+				this.#host.emitNotice(
+					"warning",
+					`snapcompact: switched active model to ${readerModel.provider}/${readerModel.id} (vision role) — ${previousModelId} cannot read image frames`,
+					"compaction",
+				);
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				this.#host.emitNotice(
+					"warning",
+					`snapcompact could not switch the session to ${readerModel.provider}/${readerModel.id} (vision role): ${reason}`,
+					"compaction",
+				);
+				return undefined;
+			}
+		}
 
 		const rebuiltEntryId = this.#host.sessionManager.appendCompaction(
 			result.summary,
@@ -4035,6 +4142,12 @@ export class SessionMaintenance {
 		const startIndex = options.methodIndex ?? 0;
 		let methodIndex = -1;
 		let method: CompactionMethod | undefined;
+		// A text-only active model can still run snapcompact when the configured
+		// `modelRoles.vision` model can read the frames; the reader switch happens
+		// only on success, right before the commit.
+		const snapcompactVisionFallback =
+			this.#model?.input.includes("image") !== true &&
+			resolveSnapcompactVisionModel(this.#host.settings, this.#host.modelRegistry, this.#model) !== undefined;
 		for (let index = startIndex; index < methods.length; index++) {
 			const candidate = methods[index];
 			if (
@@ -4044,6 +4157,7 @@ export class SessionMaintenance {
 					this.#model,
 					compactionSettings,
 					options.excludeMediaMethods === true,
+					snapcompactVisionFallback,
 				)
 			)
 				continue;
@@ -4449,102 +4563,122 @@ export class SessionMaintenance {
 			// leaves no fallback.
 			let snapcompactResult: snapcompact.CompactionResult | undefined;
 			let snapcompactBlocker: string | undefined;
+			// The reader for this pass: the active model when it can read images,
+			// else the configured `modelRoles.vision` model. Declared outside the
+			// action block because the commit tail switches the session to it on
+			// success (same invariant as the manual path).
+			let snapcompactReader: Model | undefined;
 			if (action === "snapcompact" && compactionPrep.kind !== "fromHook") {
-				// Drop `¶think:` sections for Anthropic-dialect targets: the archive
-				// is replayed as text and Claude refuses reproduced reasoning
-				// ("reasoning_extraction", issue #6093).
-				const snapcompactIncludeThinking = preferredDialect(this.#model.id) !== "anthropic";
-				const text = snapcompact.serializeConversation(
-					convertToLlm(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)),
-					{ includeThinking: snapcompactIncludeThinking },
-				);
-				const probeText = snapcompact.renderabilityProbeText(
-					text,
-					preparation.previousPreserveData,
-					preparation.previousSummary,
-				);
-				const shapeSetting = this.#host.settings.get("snapcompact.shape");
-				const shape = snapcompact.resolveShapeForText(probeText, this.#model, shapeSetting);
-				const renderScan = snapcompact.scanRenderability(probeText, { shape });
-				if (!renderScan.isSafe) {
-					const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
-					logger.warn("Snapcompact disabled: unsupported characters for selected snapcompact font", {
-						model: this.#model?.id,
-						unrenderableRatio: renderScan.unrenderableRatio,
-					});
-					snapcompactBlocker = `snapcompact disabled: unsupported characters for selected snapcompact font (${percent}%); trying the next preferred compaction method.`;
+				snapcompactReader = this.#model?.input.includes("image")
+					? this.#model
+					: resolveSnapcompactVisionModel(this.#host.settings, this.#host.modelRegistry, this.#model);
+				if (!snapcompactReader) {
+					// No reader means the committed archive would be unreadable. Set
+					// the blocker before any serialize/shape work so the existing
+					// blocker path re-dispatches to the next preferred method with
+					// nothing rendered.
+					snapcompactBlocker = `snapcompact needs a vision-capable model (${this.#model?.id ?? "none"} is text-only) and modelRoles.vision is not configured; trying the next preferred compaction method.`;
 				} else {
-					const maxFrames = this.#computeSnapcompactMaxFrames(preparation, effectiveSettings);
-					if (maxFrames < 1) {
-						logger.warn("Snapcompact skipped: kept history alone exceeds the context budget", {
+					// Drop `¶think:` sections for Anthropic-dialect targets: the archive
+					// is replayed as text and Claude refuses reproduced reasoning
+					// ("reasoning_extraction", issue #6093).
+					const snapcompactIncludeThinking = preferredDialect(snapcompactReader.id) !== "anthropic";
+					const text = snapcompact.serializeConversation(
+						convertToLlm(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)),
+						{ includeThinking: snapcompactIncludeThinking },
+					);
+					const probeText = snapcompact.renderabilityProbeText(
+						text,
+						preparation.previousPreserveData,
+						preparation.previousSummary,
+					);
+					const shapeSetting = this.#host.settings.get("snapcompact.shape");
+					const shape = snapcompact.resolveShapeForText(probeText, snapcompactReader, shapeSetting);
+					const renderScan = snapcompact.scanRenderability(probeText, { shape });
+					if (!renderScan.isSafe) {
+						const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
+						logger.warn("Snapcompact disabled: unsupported characters for selected snapcompact font", {
 							model: this.#model?.id,
+							unrenderableRatio: renderScan.unrenderableRatio,
 						});
-						snapcompactBlocker =
-							"snapcompact: kept history alone exceeds the context budget; trying the next preferred compaction method.";
+						snapcompactBlocker = `snapcompact disabled: unsupported characters for selected snapcompact font (${percent}%); trying the next preferred compaction method.`;
 					} else {
-						snapcompactResult = await snapcompact.compact(preparation, {
-							convertToLlm,
-							model: this.#model,
-							...(shapeSetting === "auto" ? {} : { shape }),
-							maxFrames,
-							includeThinking: snapcompactIncludeThinking,
-						});
-						const framePayloadBytes = this.#snapcompactFramePayloadBytes(snapcompactResult);
-						if (framePayloadBytes > snapcompact.FRAME_DATA_BYTES_BUDGET) {
-							logger.warn("Snapcompact exceeded the per-request frame payload budget", {
+						const maxFrames = this.#computeSnapcompactMaxFrames(
+							preparation,
+							effectiveSettings,
+							snapcompactReader,
+						);
+						if (maxFrames < 1) {
+							logger.warn("Snapcompact skipped: kept history alone exceeds the context budget", {
 								model: this.#model?.id,
-								framePayloadBytes,
-								budget: snapcompact.FRAME_DATA_BYTES_BUDGET,
 							});
 							snapcompactBlocker =
-								"snapcompact produced too much standing image payload; trying the next preferred compaction method.";
-							snapcompactResult = undefined;
-						}
-						if (snapcompactResult) {
-							const ctxWindow = this.#model?.contextWindow ?? 0;
-							const budget =
-								ctxWindow > 0
-									? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
-									: Number.POSITIVE_INFINITY;
-							const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
-							// Reduction check in the encrypted-reasoning-excluded domain so opaque
-							// replay signatures cannot inflate the removable baseline (#10716);
-							// `triggerContextTokens` is already an encrypted-excluded stored
-							// estimate, and `#projectPreSnapcompactContextTokens` now matches it.
-							const projectedForReduction = this.#projectSnapcompactContextTokens(
-								preparation,
-								snapcompactResult,
-								{
-									excludeEncryptedReasoning: true,
-								},
-							);
-							const reductionBaseline =
-								options.triggerContextTokens !== undefined
-									? Math.max(0, options.triggerContextTokens - (options.pendingContextTokens ?? 0))
-									: this.#projectPreSnapcompactContextTokens(preparation);
-							const preparedReductionBaseline =
-								options.preparedContextTokens === undefined
-									? reductionBaseline
-									: Math.max(0, reductionBaseline - options.preparedContextTokens) +
-										this.#projectPreSnapcompactContextTokens(preparation);
-							if (projectedForReduction >= preparedReductionBaseline) {
-								logger.warn("Snapcompact projection would not reduce context", {
+								"snapcompact: kept history alone exceeds the context budget; trying the next preferred compaction method.";
+						} else {
+							snapcompactResult = await snapcompact.compact(preparation, {
+								convertToLlm,
+								model: snapcompactReader,
+								...(shapeSetting === "auto" ? {} : { shape }),
+								maxFrames,
+								includeThinking: snapcompactIncludeThinking,
+							});
+							const framePayloadBytes = this.#snapcompactFramePayloadBytes(snapcompactResult);
+							if (framePayloadBytes > snapcompact.FRAME_DATA_BYTES_BUDGET) {
+								logger.warn("Snapcompact exceeded the per-request frame payload budget", {
 									model: this.#model?.id,
-									projected: projectedForReduction,
-									reductionBaseline: preparedReductionBaseline,
+									framePayloadBytes,
+									budget: snapcompact.FRAME_DATA_BYTES_BUDGET,
 								});
 								snapcompactBlocker =
-									"snapcompact would not reduce context; trying the next preferred compaction method.";
+									"snapcompact produced too much standing image payload; trying the next preferred compaction method.";
 								snapcompactResult = undefined;
-							} else if (projected > budget) {
-								logger.warn("Snapcompact still overflows the window after frame-budget sizing", {
-									model: this.#model?.id,
-									projected,
-									budget,
-								});
-								snapcompactBlocker =
-									"snapcompact could not bring the context under the limit; trying the next preferred compaction method.";
-								snapcompactResult = undefined;
+							}
+							if (snapcompactResult) {
+								const ctxWindow = snapcompactReader.contextWindow ?? 0;
+								const budget =
+									ctxWindow > 0
+										? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
+										: Number.POSITIVE_INFINITY;
+								const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
+								// Reduction check in the encrypted-reasoning-excluded domain so opaque
+								// replay signatures cannot inflate the removable baseline (#10716);
+								// `triggerContextTokens` is already an encrypted-excluded stored
+								// estimate, and `#projectPreSnapcompactContextTokens` now matches it.
+								const projectedForReduction = this.#projectSnapcompactContextTokens(
+									preparation,
+									snapcompactResult,
+									{
+										excludeEncryptedReasoning: true,
+									},
+								);
+								const reductionBaseline =
+									options.triggerContextTokens !== undefined
+										? Math.max(0, options.triggerContextTokens - (options.pendingContextTokens ?? 0))
+										: this.#projectPreSnapcompactContextTokens(preparation);
+								const preparedReductionBaseline =
+									options.preparedContextTokens === undefined
+										? reductionBaseline
+										: Math.max(0, reductionBaseline - options.preparedContextTokens) +
+											this.#projectPreSnapcompactContextTokens(preparation);
+								if (projectedForReduction >= preparedReductionBaseline) {
+									logger.warn("Snapcompact projection would not reduce context", {
+										model: this.#model?.id,
+										projected: projectedForReduction,
+										reductionBaseline: preparedReductionBaseline,
+									});
+									snapcompactBlocker =
+										"snapcompact would not reduce context; trying the next preferred compaction method.";
+									snapcompactResult = undefined;
+								} else if (projected > budget) {
+									logger.warn("Snapcompact still overflows the window after frame-budget sizing", {
+										model: this.#model?.id,
+										projected,
+										budget,
+									});
+									snapcompactBlocker =
+										"snapcompact could not bring the context under the limit; trying the next preferred compaction method.";
+									snapcompactResult = undefined;
+								}
 							}
 						}
 					}
@@ -4774,6 +4908,33 @@ export class SessionMaintenance {
 				tokensBefore = compactResult.tokensBefore;
 				details = compactResult.details;
 				preserveData = mergeLlmCompactionPreserveData(compactionPrep.preserveData, compactResult.preserveData);
+			}
+
+			// Switch-on-success invariant (mirrors the manual path): the committed
+			// frame archive is only readable by the reader, so the session must run
+			// it before the compaction entry lands. Local blockers threw earlier —
+			// before any switch — and a failed switch throws here, into the outer
+			// catch which advances to the next preferred method while the session
+			// is still unswitched (the catch now only guards pre-switch failures
+			// (auth check, metadata refresh)). Settings are never mutated.
+			if (snapcompactResult && snapcompactReader && snapcompactReader !== this.#model) {
+				const previousModelId = this.#model?.id;
+				try {
+					await this.#host.setModelTemporary(snapcompactReader, undefined, { role: "vision" });
+					this.#host.emitNotice(
+						"warning",
+						`snapcompact: switched active model to ${snapcompactReader.provider}/${snapcompactReader.id} (vision role) — ${previousModelId} cannot read image frames`,
+						"compaction",
+					);
+				} catch (error) {
+					const reason = error instanceof Error ? error.message : String(error);
+					this.#host.emitNotice(
+						"warning",
+						`snapcompact could not switch the session to ${snapcompactReader.provider}/${snapcompactReader.id} (vision role): ${reason}`,
+						"compaction",
+					);
+					throw error;
+				}
 			}
 
 			return await this.#commitAutoCompactionResult({

@@ -83,3 +83,16 @@ export function resolveRoleModelFull(
 		matchPreferences: getModelMatchPreferences(settings),
 	});
 }
+
+/**
+ * Resolves the explicitly configured `modelRoles.vision` model for reading
+ * snapcompact image frames. It never falls back to @default or availability.
+ */
+export function resolveSnapcompactVisionModel(
+	settings: Settings,
+	modelRegistry: ModelRegistry,
+	activeModel: Model | undefined,
+): Model | undefined {
+	const model = resolveRoleModelFull(settings, "vision", modelRegistry.getAvailable(), activeModel).model;
+	return model?.input.includes("image") && modelRegistry.hasConfiguredAuth(model) ? model : undefined;
+}

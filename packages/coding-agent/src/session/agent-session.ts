@@ -8513,7 +8513,7 @@ export class AgentSession {
 	setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
-		options?: { ephemeral?: boolean },
+		options?: { ephemeral?: boolean; role?: string },
 	): Promise<void> {
 		return this.#models.setModelTemporary(model, thinkingLevel, options);
 	}
@@ -8959,8 +8959,15 @@ export class AgentSession {
 	}
 
 	async #reconcileModelDependentState(previousModel: Model | undefined, model: Model): Promise<void> {
-		// Re-evaluate append-only context mode — provider or setting may have changed
-		this.#syncAppendOnlyContext(model);
+		// Re-evaluate append-only context mode — provider or setting may have
+		// changed. Best-effort like the reconciles below: `agent.setModel` has
+		// already landed, so a throw here must not reject the switch primitive
+		// after the session moved.
+		try {
+			this.#syncAppendOnlyContext(model);
+		} catch (error) {
+			logger.warn("append-only context sync after model change failed", { error: String(error) });
+		}
 
 		if (this.#tools.codeModeChangesBetween(previousModel, model) || this.#tools.codeModeDirectWireMetadataChanged()) {
 			try {

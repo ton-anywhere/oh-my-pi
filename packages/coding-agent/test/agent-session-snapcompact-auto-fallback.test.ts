@@ -8,6 +8,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CompactionMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
+import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 const UNRENDERABLE_SNAPCOMPACT_TEXT = "\uE000\uE001\uE002\uE003\uE004\uE005\uE006\uE007\uE008\uE009";
@@ -25,6 +26,8 @@ interface HarnessOptions {
 	seedMessages?: Message[];
 	/** Null leaves compaction.methodOrder at its schema default. */
 	methodOrder?: readonly CompactionMethod[] | null;
+	/** Null omits modelRoles.vision, leaving a text-only active model with no reader. */
+	visionRole?: string | null;
 }
 
 async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptions): Promise<Harness> {
@@ -50,7 +53,9 @@ async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptio
 		// 20k window the cut keeps both tiny messages, leaving nothing for
 		// snapcompact's renderability preflight to scan.
 		"compaction.keepRecentTokens": 1,
-		modelRoles: { vision: "aimlapi/claude-sonnet-4-5-20250929" },
+		...(options.visionRole === null
+			? {}
+			: { modelRoles: { vision: options.visionRole ?? "aimlapi/claude-sonnet-4-5-20250929" } }),
 	});
 	const session = new AgentSession({
 		agent,
@@ -135,9 +140,88 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		authStorage.close();
 	});
 
+	it("uses snapcompact with the vision reader when the active model is text-only", async () => {
+		const harness = await createHarness(modelRegistry, {
+			activeModel: { provider: "aimlapi", id: "alibaba/qwen3-coder-480b-a35b-instruct" },
+		});
+		session = harness.session;
+		harness.triggerThreshold();
+
+		const result = await harness.awaitCompactionEnd();
+		// A text-only active model is no longer a local blocker when
+		// `modelRoles.vision` names a usable reader: the pass runs against the
+		// vision model and the session switches to it before the entry lands.
+		expect(result).toEqual({ action: "snapcompact", errorMessage: undefined });
+		expect(compactionModule.compact).not.toHaveBeenCalled();
+		expect(harness.sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(true);
+	});
+
+	it("switches the session to the vision model with a vision-role model change before the entry lands", async () => {
+		const harness = await createHarness(modelRegistry, {
+			activeModel: { provider: "aimlapi", id: "alibaba/qwen3-coder-480b-a35b-instruct" },
+		});
+		session = harness.session;
+		harness.triggerThreshold();
+		await harness.awaitCompactionEnd();
+
+		// Switch-on-success invariant: the committed archive is only readable by
+		// the reader, so the session must already run it, recorded under the
+		// "vision" role (never "default", never a settings write).
+		expect(harness.session.model?.id).toBe("claude-sonnet-4-5-20250929");
+		const lastModelChange = harness.sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "model_change")
+			.at(-1);
+		expect(lastModelChange).toMatchObject({ model: "aimlapi/claude-sonnet-4-5-20250929", role: "vision" });
+		const switchNotice = harness.notices.find(message =>
+			message.startsWith("snapcompact: switched active model to aimlapi/claude-sonnet-4-5-20250929 (vision role)"),
+		);
+		expect(switchNotice).toContain("alibaba/qwen3-coder-480b-a35b-instruct cannot read image frames");
+		expect(switchNotice).not.toContain("claude-sonnet-4-5-20250929 cannot read image frames");
+	});
+
+	it("restores the vision model before the default after the snapcompact switch", async () => {
+		const harness = await createHarness(modelRegistry, {
+			activeModel: { provider: "aimlapi", id: "alibaba/qwen3-coder-480b-a35b-instruct" },
+		});
+		session = harness.session;
+		harness.triggerThreshold();
+		await harness.awaitCompactionEnd();
+
+		const context = harness.sessionManager.buildSessionContext({ transcript: true });
+		expect(getRestorableSessionModels(context.models, harness.sessionManager.getLastModelChangeRole())).toEqual([
+			"aimlapi/claude-sonnet-4-5-20250929",
+			"aimlapi/alibaba/qwen3-coder-480b-a35b-instruct",
+		]);
+	});
+
+	it("keeps the active model when a local blocker stops the vision reader", async () => {
+		const harness = await createHarness(modelRegistry, {
+			activeModel: { provider: "aimlapi", id: "alibaba/qwen3-coder-480b-a35b-instruct" },
+			seedMessages: [
+				{
+					role: "user",
+					content: UNRENDERABLE_SNAPCOMPACT_TEXT.repeat(10),
+					timestamp: Date.now(),
+				},
+			],
+		});
+		session = harness.session;
+		harness.triggerThreshold();
+
+		const result = await harness.awaitCompactionEnd();
+		// The glyph blocker rejects the pass before any render lands, so the
+		// session must stay exactly as unswitched as if no role were configured.
+		expect(result.action).toBe("context-full");
+		expect(compactionModule.compact).toHaveBeenCalled();
+		expect(harness.session.model?.id).toBe("alibaba/qwen3-coder-480b-a35b-instruct");
+		expect(harness.sessionManager.getBranch().some(entry => entry.type === "model_change")).toBe(false);
+	});
+
 	it("uses soft compaction when snapcompact is unavailable for the active model", async () => {
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "aimlapi", id: "alibaba/qwen3-coder-480b-a35b-instruct" },
+			visionRole: null,
 		});
 		session = harness.session;
 		harness.triggerThreshold();

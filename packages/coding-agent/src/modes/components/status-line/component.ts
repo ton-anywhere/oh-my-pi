@@ -22,6 +22,7 @@ import { adjustHsv, formatNumber, getProjectDir, hexToRgb, rgbToHex } from "@oh-
 import { settings } from "../../../config/settings";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
+import { resolveSnapcompactVisionModel } from "../../../session/role-models";
 import { limitMatchesActiveAccount } from "../../../slash-commands/helpers/active-oauth-account";
 import { type ActiveRepoContext, resolveActiveRepoContextSync } from "../../../utils/active-repo-context";
 import { withTimeoutSignal } from "../../../utils/fetch-timeout";
@@ -2886,8 +2887,18 @@ export class StatusLineComponent implements Component {
 		// The active model gates which compaction method a real pass would run
 		// (and therefore whether a speculation tick is meaningful).
 		const model = this.session.state?.model ?? this.session.model;
+		// A text-only active model with a usable `modelRoles.vision` reader is
+		// snapcompact-available, which suppresses soft speculation — the gauge's
+		// speculation tick must mirror the engine's availability arm.
+		const modelRegistry = this.session.modelRegistry;
+		const snapcompactVisionFallback =
+			model !== null &&
+			model !== undefined &&
+			!model.input.includes("image") &&
+			modelRegistry !== undefined &&
+			resolveSnapcompactVisionModel(source, modelRegistry, model) !== undefined;
 		try {
-			return computeCompactionBoundaries(source, contextWindow, model);
+			return computeCompactionBoundaries(source, contextWindow, model, snapcompactVisionFallback);
 		} catch {
 			return null;
 		}
