@@ -104,7 +104,7 @@ describe("AgentSession snapcompact vision recall", () => {
 	});
 
 	async function createHarness(
-		options: { visionRole?: string | null; seedMessages?: Message[] } = {},
+		options: { visionRole?: string | null; seedMessages?: Message[]; failRecallTool?: boolean } = {},
 	): Promise<Harness> {
 		const activeModel = getBundledModel("aimlapi", "alibaba/qwen3-coder-480b-a35b-instruct");
 		if (!activeModel) throw new Error("Expected bundled text-only model");
@@ -168,7 +168,9 @@ describe("AgentSession snapcompact vision recall", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			createSnapcompactRecallTool: async () => (await HIDDEN_TOOLS.snapcompact_recall(toolSession)) ?? null,
+			createSnapcompactRecallTool: options.failRecallTool
+				? async () => null
+				: async () => (await HIDDEN_TOOLS.snapcompact_recall(toolSession)) ?? null,
 		});
 
 		return { session: sessionRef, sessionManager, activeModel, settings, modelRegistry, toolSession };
@@ -374,6 +376,35 @@ describe("AgentSession snapcompact vision recall", () => {
 		const result = await harness.session.navigateTree(firstEntryId);
 		expect(result.cancelled).toBe(false);
 		expect(activeToolNames(harness)).not.toContain("snapcompact_recall");
+	});
+
+	it("surfaces a warning notice once per archive when the recall tool cannot be enabled", async () => {
+		const harness = await createHarness({ failRecallTool: true });
+		const firstEntryId = harness.sessionManager.getBranch()[0]?.id;
+		if (!firstEntryId) throw new Error("Expected a first branch entry");
+		const notices: { level: string; message: string; source?: string }[] = [];
+		harness.session.subscribe(event => {
+			if (event.type === "notice") {
+				notices.push({ level: event.level, message: event.message, source: event.source });
+			}
+		});
+
+		await harness.session.compact(undefined, { mode: "snapcompact" });
+		expect(activeToolNames(harness)).not.toContain("snapcompact_recall");
+		const leafId = harness.sessionManager.getBranch().at(-1)?.id;
+		if (!leafId) throw new Error("Expected a branch leaf");
+
+		// Re-syncing the same archive through navigation must not repeat the warning.
+		const away = await harness.session.navigateTree(firstEntryId);
+		expect(away.cancelled).toBe(false);
+		const back = await harness.session.navigateTree(leafId);
+		expect(back.cancelled).toBe(false);
+
+		const recallNotices = notices.filter(
+			event => event.source === "compaction" && event.message.includes("snapcompact_recall"),
+		);
+		expect(recallNotices).toHaveLength(1);
+		expect(recallNotices[0].level).toBe("warning");
 	});
 
 	it("exposes a frame-less archive as plain text without activating the tool", async () => {

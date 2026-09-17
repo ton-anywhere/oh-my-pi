@@ -6687,6 +6687,9 @@ export class AgentSession {
 		);
 	};
 
+	/** Compaction entry id whose failed `snapcompact_recall` enablement already surfaced a notice. */
+	#lastSnapcompactRecallEnableNoticeId: string | undefined;
+
 	/**
 	 * Reconcile the snapcompact_recall tool's active state with the current
 	 * branch: enabled only while the branch's latest compaction carries a
@@ -6699,6 +6702,18 @@ export class AgentSession {
 		const ok = await this.#tools.setSnapcompactRecallToolEnabled(enabled);
 		if (enabled && !ok) {
 			logger.warn("Failed to enable snapcompact_recall tool", { compactionId: compaction?.id });
+			// The recall-availability marker still advertises the tool in the
+			// rebuilt context, so surface the gap before the next model request —
+			// once per compaction entry, since this sync runs at every prompt
+			// and navigation boundary.
+			if (compaction?.id !== this.#lastSnapcompactRecallEnableNoticeId) {
+				this.#lastSnapcompactRecallEnableNoticeId = compaction?.id;
+				this.emitNotice(
+					"warning",
+					"snapcompact_recall could not be enabled for the current snapcompact archive; archived frames cannot be queried.",
+					"compaction",
+				);
+			}
 		}
 	}
 
