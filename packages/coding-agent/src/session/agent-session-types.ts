@@ -200,6 +200,8 @@ export interface AgentSessionConfig {
 	createMemoryTools?: () => Promise<AgentTool[]>;
 	/** Creates the private `think` scratchpad tool for runtime setting changes. */
 	createThinkTool?: () => Promise<AgentTool | null>;
+	/** Creates the private `snapcompact_recall` tool for runtime archive access. */
+	createSnapcompactRecallTool?: () => Promise<AgentTool | null>;
 	/** Model registry for API key resolution and model discovery. */
 	modelRegistry: ModelRegistry;
 	/** Whether the startup model may be replaced by refreshed same-selector registry metadata. */

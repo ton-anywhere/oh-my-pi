@@ -156,6 +156,7 @@ describe("MemoryProtocolHandler", () => {
 				appendCustomEntry: manager.appendCustomEntry.bind(manager),
 				ensureOnDisk: manager.ensureOnDisk.bind(manager),
 				flush: manager.flush.bind(manager),
+				buildSessionContext: manager.buildSessionContext.bind(manager),
 				getBranch: manager.getBranch.bind(manager),
 				getEntries: manager.getEntries.bind(manager),
 			};

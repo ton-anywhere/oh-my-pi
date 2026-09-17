@@ -7,7 +7,7 @@ import * as blobStore from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getAgentDir, getBlobsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
-
+import snapcompactRecallAvailableMarker from "../../src/prompts/system/snapcompact-recall-available.md" with { type: "text" };
 const FRAME_COUNT = 10;
 const FRAME_RAW_BYTES = 300_000;
 
@@ -80,6 +80,24 @@ function imageDataIn(messages: readonly unknown[]): string[] {
 	return found;
 }
 
+function textBlocksIn(messages: readonly unknown[]): string[] {
+	const found: string[] = [];
+	const walk = (value: unknown): void => {
+		if (Array.isArray(value)) {
+			for (const item of value) walk(item);
+			return;
+		}
+		if (!value || typeof value !== "object") return;
+		if ("type" in value && value.type === "text" && "text" in value && typeof value.text === "string") {
+			found.push(value.text);
+			return;
+		}
+		for (const item of Object.values(value)) walk(item);
+	};
+	walk(messages);
+	return found;
+}
+
 describe("lazy snapcompact frame resolution", () => {
 	const tempDirs: string[] = [];
 	const originalAgentDir = getAgentDir();
@@ -136,10 +154,27 @@ describe("lazy snapcompact frame resolution", () => {
 		expect(asyncRead).not.toHaveBeenCalled();
 		expect(archiveFrames(resumed, compactionId).every(frame => frame.data.startsWith("blob:sha256:"))).toBe(true);
 
-		const images = new Set(imageDataIn(resumed.buildSessionContext().messages));
-		expect(images.size).toBe(7);
-		expect(images.has(frameData(3))).toBe(true);
-		expect(images.has(frameData(9))).toBe(true);
+		// Normal (non-transcript) context reconstruction is image-free: the active
+		// conversation model never receives snapcompact frames directly.
+		expect(imageDataIn(resumed.buildSessionContext().messages)).toEqual([]);
+		const textBlocks = textBlocksIn(resumed.buildSessionContext().messages);
+
+		const headIndex = textBlocks.findIndex(text => text.includes("head"));
+		const markerIndex = textBlocks.findIndex(text => text === snapcompactRecallAvailableMarker);
+		const tailIndex = textBlocks.findIndex((text, index) => index > markerIndex && text.includes("tail"));
+		expect(headIndex).toBeGreaterThanOrEqual(0);
+		expect(markerIndex).toBeGreaterThan(headIndex);
+		expect(tailIndex).toBeGreaterThan(markerIndex);
+		expect(syncRead).not.toHaveBeenCalled();
+
+		// Explicit recall reconstruction resolves blob-backed frames, keeping only
+		// the newest within the byte budget.
+		const recallImages = new Set(
+			imageDataIn(resumed.buildSessionContext({ includeSnapcompactFrames: true }).messages),
+		);
+		expect(recallImages.size).toBe(7);
+		expect(recallImages.has(frameData(3))).toBe(true);
+		expect(recallImages.has(frameData(9))).toBe(true);
 		expect(syncRead).toHaveBeenCalledTimes(7);
 		await resumed.close();
 	});

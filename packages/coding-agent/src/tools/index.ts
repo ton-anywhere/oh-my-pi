@@ -61,6 +61,7 @@ import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
 import { SecurityScanTool } from "./security-scan";
+import { SnapcompactRecallTool } from "./snapcompact-recall";
 import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase, TodoTool } from "./todo";
 import { WriteTool } from "./write";
@@ -268,7 +269,7 @@ export interface ToolSession {
 	/** Owning journal; full SDK managers also supply registered identity without changing advisor-local IDs. */
 	sessionManager?: Pick<
 		SessionManager,
-		"appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"
+		"appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries" | "buildSessionContext"
 	> & { getSessionId?: SessionManager["getSessionId"] };
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
 	getEvalKernelOwnerId?: () => string | null;
@@ -507,6 +508,7 @@ export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
 	think: () => new ThinkTool(),
 	yield: s => new YieldTool(s),
 	goal: s => new GoalTool(s),
+	snapcompact_recall: s => new SnapcompactRecallTool(s),
 };
 
 export type ToolName = BuiltinToolName;

@@ -75,6 +75,8 @@ interface SessionToolsOptions {
 	createVibeTools?: () => AgentTool[];
 	/** Creates the private `think` scratchpad tool for runtime setting changes. */
 	createThinkTool?: () => Promise<AgentTool | null>;
+	/** Creates the private `snapcompact_recall` tool for runtime archive access. */
+	createSnapcompactRecallTool?: () => Promise<AgentTool | null>;
 	builtInToolNames?: Iterable<string>;
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** MCP tool names whose current registry entries came from the manager snapshot. */
@@ -220,8 +222,9 @@ export class SessionTools {
 	readonly #host: SessionToolsHost;
 	#autoApprove: boolean;
 	#toolRegistry: Map<string, AgentTool>;
-	#createVibeTools: (() => AgentTool[]) | undefined;
+	#createVibeTools: SessionToolsOptions["createVibeTools"];
 	#createThinkTool: SessionToolsOptions["createThinkTool"];
+	#createSnapcompactRecallTool: SessionToolsOptions["createSnapcompactRecallTool"];
 	#installedVibeToolNames = new Set<string>();
 	#builtInToolNames: Set<string>;
 	#rpcHostToolNames = new Set<string>();
@@ -320,6 +323,7 @@ export class SessionTools {
 		this.#toolRegistry = options.toolRegistry ?? new Map();
 		this.#createVibeTools = options.createVibeTools;
 		this.#createThinkTool = options.createThinkTool;
+		this.#createSnapcompactRecallTool = options.createSnapcompactRecallTool;
 		this.#builtInToolNames = new Set(options.builtInToolNames ?? []);
 		this.#mcpManagerToolNames = new Set(options.mcpManagerToolNames ?? []);
 		if (options.mcpManagerToolNames === undefined) {
@@ -1655,7 +1659,39 @@ export class SessionTools {
 			return true;
 		});
 	}
+	/**
+	 * Enables the snapcompact recall tool for runtime archive access.
+	 * Enabling constructs the tool once and refreshes the model's tool contract;
+	 * disabling removes it from the active set while preserving its registry entry.
+	 *
+	 * @returns false when enabling was requested but this session cannot build the tool.
+	 */
+	setSnapcompactRecallToolEnabled(enabled: boolean): Promise<boolean> {
+		return this.#setSnapcompactRecallToolActive(enabled);
+	}
 
+	#setSnapcompactRecallToolActive(enabled: boolean): Promise<boolean> {
+		return this.runToolRegistryMutation(async () => {
+			const active = this.getEnabledToolNames();
+			if (!enabled) {
+				if (active.includes("snapcompact_recall")) {
+					await this.#applyActiveToolsByName(active.filter(name => name !== "snapcompact_recall"));
+				}
+				return true;
+			}
+			if (!this.#toolRegistry.has("snapcompact_recall")) {
+				const tool = await this.#createSnapcompactRecallTool?.();
+				if (tool?.name !== "snapcompact_recall") return false;
+				const wrapped = this.#wrapRuntimeTool(tool);
+				this.#toolRegistry.set(wrapped.name, wrapped);
+				this.#builtInToolNames.add(wrapped.name);
+			}
+			if (!active.includes("snapcompact_recall")) {
+				await this.#applyActiveToolsByName([...active, "snapcompact_recall"]);
+			}
+			return true;
+		});
+	}
 	/**
 	 * Rebuilds the stable base prompt for the current tools and model.
 	 * `commitIf` lets asynchronous producers discard a stale rebuild atomically

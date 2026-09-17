@@ -2887,18 +2887,18 @@ export class StatusLineComponent implements Component {
 		// The active model gates which compaction method a real pass would run
 		// (and therefore whether a speculation tick is meaningful).
 		const model = this.session.state?.model ?? this.session.model;
-		// A text-only active model with a usable `modelRoles.vision` reader is
-		// snapcompact-available, which suppresses soft speculation — the gauge's
-		// speculation tick must mirror the engine's availability arm.
+		// Snapcompact availability is the explicit `modelRoles.vision` reader
+		// resolving with credentials — the active model's own image capability
+		// no longer makes it selectable. The gauge's speculation tick must
+		// mirror the engine's availability arm.
 		const modelRegistry = this.session.modelRegistry;
-		const snapcompactVisionFallback =
+		const snapcompactAvailable =
 			model !== null &&
 			model !== undefined &&
-			!model.input.includes("image") &&
 			modelRegistry !== undefined &&
 			resolveSnapcompactVisionModel(source, modelRegistry, model) !== undefined;
 		try {
-			return computeCompactionBoundaries(source, contextWindow, model, snapcompactVisionFallback);
+			return computeCompactionBoundaries(source, contextWindow, model, snapcompactAvailable);
 		} catch {
 			return null;
 		}

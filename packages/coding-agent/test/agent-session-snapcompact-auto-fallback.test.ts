@@ -1,17 +1,32 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { Message } from "@oh-my-pi/pi-ai";
+import { type } from "@oh-my-pi/omptype";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CompactionMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
-import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 
 const UNRENDERABLE_SNAPCOMPACT_TEXT = "\uE000\uE001\uE002\uE003\uE004\uE005\uE006\uE007\uE008\uE009";
+
+/** Minimal stand-in for the sidecar tool: the fallback tests only observe lifecycle activation. */
+function makeRecallStub(): AgentTool {
+	return {
+		name: "snapcompact_recall",
+		approval: "read" as const,
+		label: "Snapcompact Recall",
+		description: "Recall exact detail from the archived snapcompact history",
+		parameters: type({ query: "string" }),
+		async execute() {
+			return { content: [{ type: "text" as const, text: "stub-recall" }] };
+		},
+	};
+}
 
 interface Harness {
 	session: AgentSession;
@@ -62,6 +77,7 @@ async function createHarness(modelRegistry: ModelRegistry, options: HarnessOptio
 		sessionManager,
 		settings,
 		modelRegistry,
+		createSnapcompactRecallTool: async () => makeRecallStub(),
 	});
 	vi.spyOn(compactionModule, "compact").mockResolvedValue({
 		summary: "compacted",
@@ -150,49 +166,42 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		const result = await harness.awaitCompactionEnd();
 		// A text-only active model is no longer a local blocker when
 		// `modelRoles.vision` names a usable reader: the pass runs against the
-		// vision model and the session switches to it before the entry lands.
+		// vision reader while the session keeps the active conversation model.
 		expect(result).toEqual({ action: "snapcompact", errorMessage: undefined });
 		expect(compactionModule.compact).not.toHaveBeenCalled();
 		expect(harness.sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(true);
+		expect(harness.session.model?.id).toBe("alibaba/qwen3-coder-480b-a35b-instruct");
+		expect(
+			harness.sessionManager.getBranch().some(entry => entry.type === "model_change" && entry.role === "vision"),
+		).toBe(false);
 	});
 
-	it("switches the session to the vision model with a vision-role model change before the entry lands", async () => {
+	it("keeps the active model and activates recall when the vision reader archives frames", async () => {
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "aimlapi", id: "alibaba/qwen3-coder-480b-a35b-instruct" },
+			seedMessages: [
+				{ role: "user", content: `first question ${"alpha ".repeat(30000)}`, timestamp: Date.now() },
+				{ role: "user", content: "second question", timestamp: Date.now() },
+			],
 		});
 		session = harness.session;
 		harness.triggerThreshold();
 		await harness.awaitCompactionEnd();
 
-		// Switch-on-success invariant: the committed archive is only readable by
-		// the reader, so the session must already run it, recorded under the
-		// "vision" role (never "default", never a settings write).
-		expect(harness.session.model?.id).toBe("claude-sonnet-4-5-20250929");
-		const lastModelChange = harness.sessionManager
-			.getBranch()
-			.filter(entry => entry.type === "model_change")
-			.at(-1);
-		expect(lastModelChange).toMatchObject({ model: "aimlapi/claude-sonnet-4-5-20250929", role: "vision" });
-		const switchNotice = harness.notices.find(message =>
-			message.startsWith("snapcompact: switched active model to aimlapi/claude-sonnet-4-5-20250929 (vision role)"),
-		);
-		expect(switchNotice).toContain("alibaba/qwen3-coder-480b-a35b-instruct cannot read image frames");
-		expect(switchNotice).not.toContain("claude-sonnet-4-5-20250929 cannot read image frames");
-	});
-
-	it("restores the vision model before the default after the snapcompact switch", async () => {
-		const harness = await createHarness(modelRegistry, {
-			activeModel: { provider: "aimlapi", id: "alibaba/qwen3-coder-480b-a35b-instruct" },
-		});
-		session = harness.session;
-		harness.triggerThreshold();
-		await harness.awaitCompactionEnd();
-
-		const context = harness.sessionManager.buildSessionContext({ transcript: true });
-		expect(getRestorableSessionModels(context.models, harness.sessionManager.getLastModelChangeRole())).toEqual([
-			"aimlapi/claude-sonnet-4-5-20250929",
-			"aimlapi/alibaba/qwen3-coder-480b-a35b-instruct",
-		]);
+		const compaction = harness.sessionManager.getBranch().find(entry => entry.type === "compaction");
+		expect(compaction).toBeDefined();
+		// The committed archive carries frames, so the sidecar recall tool must
+		// become active for the current branch.
+		const archive = snapcompact.getPreservedArchive(compaction!.preserveData);
+		expect(archive?.frames.length ?? 0).toBeGreaterThan(0);
+		// The conversation model never switches: the archive is read by the
+		// vision sidecar, not the active model.
+		expect(harness.session.model?.id).toBe("alibaba/qwen3-coder-480b-a35b-instruct");
+		expect(
+			harness.sessionManager.getBranch().some(entry => entry.type === "model_change" && entry.role === "vision"),
+		).toBe(false);
+		const activeToolNames = harness.session.agent.state.tools.map(tool => tool.name);
+		expect(activeToolNames).toContain("snapcompact_recall");
 	});
 
 	it("keeps the active model when a local blocker stops the vision reader", async () => {

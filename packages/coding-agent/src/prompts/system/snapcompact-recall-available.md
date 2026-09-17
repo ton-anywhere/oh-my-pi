@@ -1,0 +1,2 @@
+=== SNAPCOMPACT ARCHIVE — imaged middle omitted from this context ===
+The compacted history's imaged middle is not shown here; only its plain-text edges remain. When you need an exact detail (a command, error, value, or line) that was in the archived middle and is absent from the visible text, call `snapcompact_recall` with a self-contained question. Do not call it for anything the visible text already answers.

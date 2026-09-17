@@ -98,6 +98,7 @@ import {
 	stringProperty,
 	withTimeout,
 } from "@oh-my-pi/pi-utils";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 import { type AdvisorConfig, loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
 import { reset as resetCapabilities } from "../capability";
@@ -362,6 +363,7 @@ import {
 } from "./session-advisors";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import {
+	getLatestCompactionEntry,
 	getRestorableSessionModels,
 	isTranscriptEntry,
 	isUserRequestEntry,
@@ -1666,6 +1668,7 @@ export class AgentSession {
 			toolRegistry: config.toolRegistry,
 			createVibeTools: config.createVibeTools,
 			createThinkTool: config.createThinkTool,
+			createSnapcompactRecallTool: config.createSnapcompactRecallTool,
 			builtInToolNames: config.builtInToolNames,
 			mcpManagerToolNames: config.mcpManagerToolNames,
 			presentationPinnedToolNames: config.presentationPinnedToolNames,
@@ -1948,6 +1951,7 @@ export class AgentSession {
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
 			resetAdvisorRuntimes: (reason?: string) => this.#advisors.resetAllRuntimes(reason),
 			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
+			syncSnapcompactRecallTool: () => this.#syncSnapcompactRecallTool(),
 			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
@@ -5140,6 +5144,7 @@ export class AgentSession {
 		this.sessionManager.appendResetBoundary();
 
 		resetCapabilities();
+		await this.#syncSnapcompactRecallTool();
 		await this.refreshBaseSystemPrompt();
 
 		return { droppedCount };
@@ -6682,6 +6687,21 @@ export class AgentSession {
 		);
 	};
 
+	/**
+	 * Reconcile the snapcompact_recall tool's active state with the current
+	 * branch: enabled only while the branch's latest compaction carries a
+	 * frame-bearing snapcompact archive, deactivated otherwise.
+	 */
+	async #syncSnapcompactRecallTool(): Promise<void> {
+		const compaction = getLatestCompactionEntry(this.sessionManager.getBranch());
+		const archive = compaction ? snapcompact.getPreservedArchive(compaction.preserveData) : undefined;
+		const enabled = (archive?.frames.length ?? 0) > 0;
+		const ok = await this.#tools.setSnapcompactRecallToolEnabled(enabled);
+		if (enabled && !ok) {
+			logger.warn("Failed to enable snapcompact_recall tool", { compactionId: compaction?.id });
+		}
+	}
+
 	/** Stage extension results; committing them must remain synchronous with delivery validation. */
 	async #prepareAgentStart(
 		message: AgentMessage,
@@ -6690,6 +6710,7 @@ export class AgentSession {
 		generation: number,
 		signal?: AbortSignal,
 	): Promise<QueuedMessagePreparation & { baseXdevCatalogDelivered: boolean }> {
+		await this.#syncSnapcompactRecallTool();
 		const sessionGeneration = this.#sessionGeneration;
 		// Preserve ordinary prompt disposal semantics, but never begin a queued turn on a disposed session.
 		const alreadyDisposing = this.#isDisposed && signal === undefined;
@@ -8368,6 +8389,7 @@ export class AgentSession {
 			// directory set, not the previous session's — refresh before the next
 			// turn goes out.
 			resetCapabilities();
+			await this.#syncSnapcompactRecallTool();
 			await this.refreshBaseSystemPrompt();
 
 			// Emit session_switch event with reason "new" to hooks
@@ -9723,6 +9745,7 @@ export class AgentSession {
 			}
 			generationSettled.resolve();
 			this.#sessionGenerationSettled = previousSessionGenerationSettled;
+			await this.#syncSnapcompactRecallTool();
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
@@ -9913,6 +9936,7 @@ export class AgentSession {
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
 			await this.#reconcileModeAfterBranch();
+			await this.#syncSnapcompactRecallTool();
 			return { selectedText, selectedImages, cancelled: false };
 		} finally {
 			if (advisorRecordersDetached) {
@@ -10371,6 +10395,7 @@ export class AgentSession {
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 
 		this.#branchSummaryAbortController = undefined;
+		await this.#syncSnapcompactRecallTool();
 
 		// Report a committed `ask` re-answer so the interactive caller can resume
 		// the agent via `resumeAfterAskReanswer()` *after* rebuilding its

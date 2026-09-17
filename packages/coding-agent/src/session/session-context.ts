@@ -22,6 +22,7 @@ import {
 } from "./messages";
 import { CONTEXT_NOTES_ENTRY_TYPE, getContextNotes, renderContextNotes } from "./context-notes";
 import { titleTextFromSkillPrompt } from "./skill-title-input";
+import snapcompactRecallAvailableMarker from "../prompts/system/snapcompact-recall-available.md" with { type: "text" };
 import {
 	type CompactionEntry,
 	type CustomMessageEntry,
@@ -171,6 +172,13 @@ export interface BuildSessionContextOptions {
 	keepDanglingToolCalls?: boolean;
 	/** Price and resolve persisted snapcompact frame payloads on demand. */
 	resolveFrameData?: (data: string) => snapcompact.LazyFrameData | undefined;
+	/**
+	 * Non-transcript context only: include snapcompact image frames in the
+	 * rebuilt blocks. Defaults to false so the active conversation model never
+	 * receives snapcompact frames directly; the `snapcompact_recall` tool opts
+	 * in explicitly. Transcript mode always includes frames (unless collapsed).
+	 */
+	includeSnapcompactFrames?: boolean;
 }
 
 /**
@@ -188,13 +196,29 @@ export interface StrippedToolCallsMarker {
  * If leafId is provided, walks from that entry to root.
  * Handles compaction and branch summaries along the path.
  */
-function snapcompactHistoryBlocksForContext(
+export function snapcompactHistoryBlocksForContext(
 	archive: snapcompact.Archive | undefined,
 	options: BuildSessionContextOptions | undefined,
 ) {
 	if (!archive) return undefined;
 	if (options?.transcript && options.collapseCompactedHistory) return undefined;
-	return snapcompact.historyBlocks(archive, snapcompactHistoryBlockOptions(archive, options));
+	// Transcript mode and explicit recall reconstruction include frames.
+	if (options?.transcript || options?.includeSnapcompactFrames === true) {
+		return snapcompact.historyBlocks(archive, snapcompactHistoryBlockOptions(archive, options));
+	}
+	// Default non-transcript path: image-free. Reuse historyBlocks on frame-less
+	// copies so the plain-text edges get the same normalization/elision, then
+	// insert one recall-availability marker where the imaged middle was omitted.
+	// The frame-less copies never call resolveFrameData, so no blob reads happen.
+	const blockOptions = snapcompactHistoryBlockOptions(archive, options);
+	const headBlocks = snapcompact.historyBlocks({ ...archive, frames: [], textTail: undefined }, blockOptions);
+	const tailBlocks = snapcompact.historyBlocks({ ...archive, frames: [], textHead: undefined }, blockOptions);
+	const blocks = [...headBlocks];
+	if (archive.frames.length > 0) {
+		blocks.push({ type: "text", text: snapcompactRecallAvailableMarker });
+	}
+	blocks.push(...tailBlocks);
+	return blocks;
 }
 
 /** Reads validated OpenAI Responses replacement history from a compaction entry. */

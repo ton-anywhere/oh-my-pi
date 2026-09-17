@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { type } from "@oh-my-pi/omptype";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { Message, Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -10,6 +11,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 
 /**
  * Regression for issue #5064.
@@ -25,6 +27,20 @@ import { TempDir } from "@oh-my-pi/pi-utils";
  * archive request, so it MUST keep failing locally instead of silently
  * shipping the transcript to a provider.
  */
+/** Minimal stand-in for the sidecar tool: the fallback tests only observe lifecycle activation. */
+function makeRecallStub(): AgentTool {
+	return {
+		name: "snapcompact_recall",
+		approval: "read" as const,
+		label: "Snapcompact Recall",
+		description: "Recall exact detail from the archived snapcompact history",
+		parameters: type({ query: "string" }),
+		async execute() {
+			return { content: [{ type: "text" as const, text: "stub-recall" }] };
+		},
+	};
+}
+
 describe("AgentSession manual snapcompact text-only fallback", () => {
 	let session: AgentSession | undefined;
 	let authStorage: AuthStorage | undefined;
@@ -93,7 +109,13 @@ describe("AgentSession manual snapcompact text-only fallback", () => {
 			"compaction.keepRecentTokens": 1,
 			...(visionRole === undefined ? {} : { modelRoles: { vision: visionRole } }),
 		});
-		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			createSnapcompactRecallTool: async () => makeRecallStub(),
+		});
 		const notices: string[] = [];
 		session.subscribe(event => {
 			if (event.type === "notice" && event.source === "compaction") notices.push(event.message);
@@ -145,7 +167,7 @@ describe("AgentSession manual snapcompact text-only fallback", () => {
 		expect(harness.sessionManager.getBranch().find(entry => entry.type === "compaction")).toBeUndefined();
 	});
 
-	it("runs the local vision-reader pass and switches the session when modelRoles.vision is configured", async () => {
+	it("keeps the active model and activates recall when the vision reader archives frames", async () => {
 		const harness = await createHarness("aimlapi/claude-sonnet-4-5-20250929");
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => ({
 			summary: "llm summary",
@@ -159,13 +181,20 @@ describe("AgentSession manual snapcompact text-only fallback", () => {
 		// The configured reader replaces the text-only local blocker: the pass
 		// lands natively, never through the LLM summarizer.
 		expect(compactSpy).not.toHaveBeenCalled();
-		expect(harness.sessionManager.getBranch().find(entry => entry.type === "compaction")).toBeDefined();
-		// Switch-on-success: the committed archive is only readable by the reader.
-		expect(harness.session.model?.id).toBe("claude-sonnet-4-5-20250929");
-		const lastModelChange = harness.sessionManager
+		const compaction = harness.sessionManager.getBranch().find(entry => entry.type === "compaction");
+		expect(compaction).toBeDefined();
+		// The committed archive carries frames, so the sidecar recall tool must
+		// become active for the current branch.
+		const archive = snapcompact.getPreservedArchive(compaction!.preserveData);
+		expect(archive?.frames.length ?? 0).toBeGreaterThan(0);
+		// The conversation model never switches: the archive is read by the
+		// vision sidecar, not the active model.
+		expect(harness.session.model?.id).toBe(harness.activeModel.id);
+		const visionModelChanges = harness.sessionManager
 			.getBranch()
-			.filter(entry => entry.type === "model_change")
-			.at(-1);
-		expect(lastModelChange).toMatchObject({ model: "aimlapi/claude-sonnet-4-5-20250929", role: "vision" });
+			.filter(entry => entry.type === "model_change" && entry.role === "vision");
+		expect(visionModelChanges).toEqual([]);
+		const activeToolNames = harness.session.agent.state.tools.map(tool => tool.name);
+		expect(activeToolNames).toContain("snapcompact_recall");
 	});
 });

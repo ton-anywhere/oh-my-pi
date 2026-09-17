@@ -1,0 +1,1 @@
+Ask one self-contained question about an exact detail from the archived conversation history that is absent from the visible text edges, such as a command, error, value, or line. Use recall only when that exact detail is needed; do not ask it to continue the task or summarize the archive.

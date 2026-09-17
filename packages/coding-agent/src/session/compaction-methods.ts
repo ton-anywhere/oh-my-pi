@@ -117,14 +117,14 @@ export function canUseRemoteCompaction(model: Model | null | undefined, settings
 export function resolveSpeculationMethod(
 	model: Model | null | undefined,
 	settings: CompactionSettings,
-	snapcompactVisionFallback = false,
+	snapcompactAvailable = false,
 ): "remote" | "handoff" | "soft" | undefined {
 	for (const candidate of resolveCompactionMethodOrder(settings.methodOrder)) {
 		const available =
 			candidate === "remote"
 				? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate))
 				: candidate === "snapcompact"
-					? model?.input?.includes("image") === true || snapcompactVisionFallback
+					? snapcompactAvailable
 					: true;
 		if (!available) continue;
 		return candidate === "remote" || candidate === "handoff" || candidate === "soft" ? candidate : undefined;

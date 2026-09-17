@@ -100,7 +100,12 @@ import {
 	resolveSnapcompactVisionModel,
 } from "./role-models";
 import type { SessionContext } from "./session-context";
-import { buildSessionContext, getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
+import {
+	buildSessionContext,
+	getLatestCompactionEntry,
+	getOpenAiRemoteCompactionPayload,
+	snapcompactHistoryBlocksForContext,
+} from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import type { ShakeMode, ShakeResult } from "./shake-types";
@@ -161,9 +166,11 @@ function hasConfiguredCompactionMethod(settings: ConfiguredCompactionSettings): 
  * for being too large in bytes should not be retried with an even larger,
  * media-heavy one (#11482).
  *
- * `snapcompactVisionFallback` marks that `modelRoles.vision` resolves a reader for the
- * frame archive even though `model` itself is text-only, keeping snapcompact selectable
- * (the pass runs on that reader and switches the session to it on success).
+ * `snapcompactAvailable` marks that the explicitly configured `modelRoles.vision`
+ * reader resolves with credentials, which is the sole gate for snapcompact: the
+ * active model's own image capability no longer makes it selectable, and the
+ * frames never reach the active model (the `snapcompact_recall` sidecar reads
+ * them).
  */
 function isCompactionMethodUsable(
 	candidate: CompactionMethod,
@@ -171,12 +178,12 @@ function isCompactionMethodUsable(
 	model: Model | undefined,
 	settings: ConfiguredCompactionSettings,
 	excludeMedia = false,
-	snapcompactVisionFallback = false,
+	snapcompactAvailable = false,
 ): boolean {
 	return candidate === "remote"
 		? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate))
 		: candidate === "snapcompact"
-			? !excludeMedia && (model?.input.includes("image") === true || snapcompactVisionFallback)
+			? !excludeMedia && snapcompactAvailable
 			: candidate === "handoff"
 				? reason !== "overflow"
 				: true;
@@ -187,18 +194,19 @@ function isCompactionMethodUsable(
  * `runAutoCompaction` would actually select for `reason` on `model` — a non-empty
  * `methodOrder` alone (see {@link hasConfiguredCompactionMethod}) is not enough: an
  * unusable-for-this-reason configuration (e.g. `methodOrder: ["handoff"]` for an
- * `"overflow"` reason, or `snapcompact`-only on a text-only model) would otherwise be
- * reported as available and then silently no-op in `runAutoCompaction` (#11482).
+ * `"overflow"` reason, or `snapcompact`-only without a resolvable `modelRoles.vision`
+ * reader) would otherwise be reported as available and then silently no-op in
+ * `runAutoCompaction` (#11482).
  */
 function hasUsableCompactionMethod(
 	reason: "overflow" | "threshold" | "idle" | "incomplete",
 	model: Model | undefined,
 	settings: ConfiguredCompactionSettings,
 	excludeMedia = false,
-	snapcompactVisionFallback = false,
+	snapcompactAvailable = false,
 ): boolean {
 	return resolveCompactionMethodOrder(settings.methodOrder).some(candidate =>
-		isCompactionMethodUsable(candidate, reason, model, settings, excludeMedia, snapcompactVisionFallback),
+		isCompactionMethodUsable(candidate, reason, model, settings, excludeMedia, snapcompactAvailable),
 	);
 }
 
@@ -448,6 +456,7 @@ export interface SessionMaintenanceHost {
 	syncTodoPhasesFromBranch(): void;
 	resetAdvisorRuntimes(reason?: string): void;
 	rebaseAfterCompaction(): void;
+	syncSnapcompactRecallTool(): Promise<void>;
 	recordAnchoredHistoryRewrite(tokensRemoved: number): void;
 	getContextBreakdown(options?: {
 		contextWindow?: number;
@@ -1094,13 +1103,17 @@ export class SessionMaintenance {
 			const compactionSettings = this.#host.settings.getGroup("compaction");
 			methods = resolveCompactionMethodOrder(compactMode?.overrides.methodOrder ?? compactionSettings.methodOrder);
 			const explicitSnapcompact = compactMode?.name === "snapcompact";
-			// A text-only active model cannot read snapcompact's PNG frames (outbound
-			// conversion silently drops image blocks), so the configured
-			// `modelRoles.vision` model — never @default or first-available — becomes
-			// the reader for the pass; the session switches to it on success.
-			const snapcompactVisionFallback = activeModel.input.includes("image")
-				? undefined
-				: resolveSnapcompactVisionModel(this.#host.settings, this.#host.modelRegistry, activeModel);
+			// Snapcompact availability is decided solely by the explicitly
+			// configured `modelRoles.vision` reader — never @default,
+			// first-available, or the active model's own image capability. The
+			// reader renders the archive locally and later re-reads it through
+			// the `snapcompact_recall` sidecar; the session keeps the active
+			// conversation model throughout.
+			const snapcompactReader = resolveSnapcompactVisionModel(
+				this.#host.settings,
+				this.#host.modelRegistry,
+				activeModel,
+			);
 			let selectedMethod: CompactionMethod | undefined;
 			for (let index = methodOffset; index < methods.length; index++) {
 				const method = methods[index];
@@ -1115,9 +1128,7 @@ export class SessionMaintenance {
 				if (method === "snapcompact") {
 					if (
 						explicitSnapcompact ||
-						(!customInstructions &&
-							!options?.internalGuidance &&
-							(activeModel.input.includes("image") || snapcompactVisionFallback !== undefined))
+						(!customInstructions && !options?.internalGuidance && snapcompactReader !== undefined)
 					) {
 						selectedMethod = method;
 						selectedMethodIndex = index;
@@ -1205,9 +1216,6 @@ export class SessionMaintenance {
 			const snapcompactReady = wantsSnapcompact;
 			const snapcompactShapeSetting = this.#host.settings.get("snapcompact.shape");
 			let snapcompactShape: snapcompact.Shape | undefined;
-			// The reader — the model that renders and re-reads the frames — is the
-			// active model when it accepts images, else the vision-role fallback.
-			const snapcompactReader = activeModel.input.includes("image") ? activeModel : snapcompactVisionFallback;
 			if (wantsSnapcompact && !snapcompactReader) {
 				this.#host.emitNotice(
 					"warning",
@@ -1301,7 +1309,12 @@ export class SessionMaintenance {
 							"snapcompact cannot run locally: standing image payload exceeds the per-request budget.",
 						);
 					}
-					const ctxWindow = snapcompactReader.contextWindow ?? 0;
+					// The projection below describes the active conversation
+					// model's image-free payload, so the fit budget is the active
+					// model's window — not the reader's, which
+					// #computeSnapcompactMaxFrames already sized the frame cap
+					// against for the future side request.
+					const ctxWindow = activeModel.contextWindow ?? 0;
 					const budget =
 						ctxWindow > 0
 							? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
@@ -1310,14 +1323,22 @@ export class SessionMaintenance {
 					// No-reduction decision runs in the encrypted-reasoning-excluded domain
 					// on both sides: opaque replay signatures (thinkingSignature /
 					// redactedThinking) have no trustworthy local token price, so counting
-					// them in the archived region's baseline while the imaged projection
-					// drops them lets an inflating result pass the guard (#10716). The
-					// window-fit check below keeps the conservative `projected`.
+					// them in the archived region's baseline while the image-free
+					// projection drops them lets an inflating result pass the guard
+					// (#10716). The window-fit check below keeps the conservative
+					// `projected`.
 					const projectedForReduction = this.#projectSnapcompactContextTokens(preparation, snapcompactResult, {
 						excludeEncryptedReasoning: true,
 					});
 					const reductionBaseline = this.#projectPreSnapcompactContextTokens(preparation);
-					if (projectedForReduction >= reductionBaseline) {
+					// A frame-less archive (`text.length <= 2 * edgeCap` in planArchive) keeps the
+					// discarded text verbatim in textHead, so its image-free projection is the
+					// baseline plus the summary lead — never a reduction. The no-reduction guard
+					// must not veto it: #computeSnapcompactMaxFrames already admits the text-only
+					// layout when the frame charge would overflow, and the window-fit check below
+					// still bounds the result.
+					const archive = snapcompact.getPreservedArchive(snapcompactResult.preserveData);
+					if ((archive?.frames.length ?? 0) > 0 && projectedForReduction >= reductionBaseline) {
 						logger.warn("Snapcompact projection would not reduce context", {
 							model: this.#model?.id,
 							projected: projectedForReduction,
@@ -1414,33 +1435,6 @@ export class SessionMaintenance {
 				throw new CompactionCancelledError(undefined, {
 					cause: compactionAbortController.signal.reason,
 				});
-			}
-
-			// Switch-on-success invariant: the committed frame archive is only
-			// readable by the reader, so the session must already run the reader
-			// when the compaction entry lands. Every local blocker threw above,
-			// before any switch; a failed switch throws here — before
-			// `compactionCommitted` flips — so the retry catch below keeps walking
-			// the method order and the session is never left switched to a model
-			// whose entry it could not read (the catch now only guards
-			// pre-switch failures (auth check, metadata refresh)). Settings are never mutated.
-			if (snapcompactResult && snapcompactReader && snapcompactReader !== activeModel) {
-				try {
-					await this.#host.setModelTemporary(snapcompactReader, undefined, { role: "vision" });
-					this.#host.emitNotice(
-						"warning",
-						`snapcompact: switched active model to ${snapcompactReader.provider}/${snapcompactReader.id} (vision role) — ${activeModel.id} cannot read image frames`,
-						"compaction",
-					);
-				} catch (error) {
-					const reason = error instanceof Error ? error.message : String(error);
-					this.#host.emitNotice(
-						"warning",
-						`snapcompact could not switch the session to ${snapcompactReader.provider}/${snapcompactReader.id} (vision role): ${reason}`,
-						"compaction",
-					);
-					throw error;
-				}
 			}
 
 			markCommitted();
@@ -2047,12 +2041,11 @@ export class SessionMaintenance {
 		}
 		const model = this.#model;
 		if (!model) return;
-		// A text-only active model still speculates snapcompact when the vision
-		// role can read the frames (mirrors the auto-path availability arm).
-		const snapcompactVisionFallback =
-			!model.input.includes("image") &&
+		// Snapcompact availability is the explicit `modelRoles.vision` reader
+		// resolving with credentials (mirrors the auto-path availability arm).
+		const snapcompactAvailable =
 			resolveSnapcompactVisionModel(this.#host.settings, this.#host.modelRegistry, model) !== undefined;
-		const method = resolveSpeculationMethod(model, settings, snapcompactVisionFallback);
+		const method = resolveSpeculationMethod(model, settings, snapcompactAvailable);
 		if (!method) return;
 		this.#startSpeculationRun(contextTokens, method);
 	}
@@ -2098,10 +2091,9 @@ export class SessionMaintenance {
 		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return false;
 		const model = this.#model;
 		if (!model) return false;
-		const snapcompactVisionFallback =
-			!model.input.includes("image") &&
+		const snapcompactAvailable =
 			resolveSnapcompactVisionModel(this.#host.settings, this.#host.modelRegistry, model) !== undefined;
-		const method = resolveSpeculationMethod(model, settings, snapcompactVisionFallback);
+		const method = resolveSpeculationMethod(model, settings, snapcompactAvailable);
 		if (!method) return false;
 		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
 		const graceCapTokens = Math.min(
@@ -2359,6 +2351,7 @@ export class SessionMaintenance {
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.rebaseAfterCompaction();
+		await this.#host.syncSnapcompactRecallTool();
 		// Compaction discarded the conversation history that carried the approved
 		// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
 		// the plan from disk and re-injects it on the next turn (issue #1246).
@@ -3531,18 +3524,16 @@ export class SessionMaintenance {
 		return archive ? snapcompact.frameDataBytes(archive.frames) : 0;
 	}
 
-	#deadEndRemedies(defaultRemedies: string, implicatedFrames: number): string {
-		if (implicatedFrames <= 0) return defaultRemedies;
-		return `reduce archived image frames (${implicatedFrames} held) — providers often bill vision media separately from tokens; ${defaultRemedies}`;
-	}
-
 	/**
 	 * Project the post-compaction context size of a snapcompact result: kept
-	 * recent messages + the summary message with its re-attached frames + the
-	 * fixed non-message overhead (system prompt + tools). Mirrors how the
-	 * compacted context is rebuilt, so the estimate matches the wire shape, and
-	 * lets the caller decide whether snapcompact brought the context under the
-	 * window or should fall back to an LLM summary.
+	 * recent messages + the image-free summary message (text edges and the
+	 * recall-availability marker, no frames) + the fixed non-message overhead
+	 * (system prompt + tools). Mirrors the default non-transcript rebuild the
+	 * active conversation model actually receives — the frames never reach it
+	 * (the `snapcompact_recall` sidecar reads them separately) — so the
+	 * estimate matches the active model's wire shape and lets the caller decide
+	 * whether snapcompact brought the context under the window or should fall
+	 * back to an LLM summary.
 	 */
 	#projectSnapcompactContextTokens(
 		preparation: CompactionPreparation,
@@ -3550,9 +3541,7 @@ export class SessionMaintenance {
 		options?: MessageCountOptions,
 	): number {
 		const archive = snapcompact.getPreservedArchive(result.preserveData);
-		const blocks = archive
-			? snapcompact.historyBlocks(archive, { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET })
-			: undefined;
+		const blocks = snapcompactHistoryBlocksForContext(archive, undefined);
 		const summaryMessage = createCompactionSummaryMessage(
 			result.summary,
 			result.tokensBefore,
@@ -3586,9 +3575,7 @@ export class SessionMaintenance {
 		const branch = this.#host.sessionManager.getBranch();
 		const leaf = branch.at(-1);
 		const archive = snapcompact.getPreservedArchive(args.preserveData);
-		const blocks = archive
-			? snapcompact.historyBlocks(archive, { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET })
-			: undefined;
+		const blocks = snapcompactHistoryBlocksForContext(archive, undefined);
 		const projectionOptions = { excludeEncryptedReasoning: true } as const;
 		if (!leaf) {
 			const summaryMessage = createCompactionSummaryMessage(
@@ -3778,17 +3765,6 @@ export class SessionMaintenance {
 		options: { skipElide: boolean; hasProgress: () => boolean },
 	): Promise<boolean> {
 		if (signal.aborted) return false;
-		// Tier 0 — a snapcompact pass whose just-written frame archive is itself
-		// the over-budget cost (each pass re-renders the carried-forward text
-		// into MORE frames, so the archive grows past the recovery band and the
-		// elide/image tiers below can never shrink it): rebuild the archive at
-		// a threshold-derived frame budget.
-		const frameRescue = await this.#rescueSnapcompactFrameOverflow(
-			this.#host.sessionManager.getBranch(),
-			resolveMethodSettings(this.#host.settings.getGroup("compaction"), "snapcompact"),
-			signal,
-		);
-		if (frameRescue !== undefined && options.hasProgress()) return true;
 		let elided = 0;
 		let elidedTokens = 0;
 		let elideSink = "placeholders";
@@ -3843,230 +3819,6 @@ export class SessionMaintenance {
 	/** Notice fragment for a dead-end elide tier: what was freed and where it went. */
 	#describeElideRescue(elided: number, tokensFreed: number, sink: string): string {
 		return `elided ${elided} heavy block${elided === 1 ? "" : "s"} (~${tokensFreed.toLocaleString()} tokens) to ${sink}`;
-	}
-
-	/**
-	 * Frame budget for {@link #rescueSnapcompactFrameOverflow}: targets
-	 * `COMPACTION_RECOVERY_BAND × threshold` (the same band
-	 * {@link #compactionCreatedHeadroom} re-tests), not the window-fit budget
-	 * {@link #computeSnapcompactMaxFrames} sizes against — a rebuilt archive
-	 * must land back under the maintenance trigger, or the next settle
-	 * re-enters the same dead-end. Cap reserve mirrors
-	 * #computeSnapcompactMaxFrames (text edges + summary template), and
-	 * `keptTailTokens` charges the kept entries AFTER the archive so the
-	 * budget mirrors what #compactionCreatedHeadroom will actually measure.
-	 * Returns 0 when not even one frame fits that budget — the rebuild could
-	 * never create headroom, so the caller must not append it.
-	 */
-	#computeSnapcompactRescueMaxFrames(
-		settings: EngineCompactionSettings,
-		keptTailTokens: number,
-		readerModel: Model,
-	): number {
-		// Window/provider inputs key off the reader, matching #computeSnapcompactMaxFrames.
-		const ctxWindow = readerModel.contextWindow ?? 0;
-		if (ctxWindow <= 0) {
-			return Math.min(
-				snapcompact.MAX_FRAMES_DEFAULT,
-				snapcompact.maxFramesForDataBudget(),
-				snapcompact.providerFrameBudget(readerModel.provider),
-			);
-		}
-		const thresholdTokens = resolveThresholdTokens(ctxWindow, settings);
-		const recoveryBandTokens = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
-		const baseTokens = computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer);
-		const shape = snapcompact.resolveShape(readerModel, this.#host.settings.get("snapcompact.shape"));
-		const edgeCap = snapcompact.geometry(shape).capacity;
-		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
-		const SUMMARY_TEMPLATE_TOKENS = 2000;
-		const frameBudget = recoveryBandTokens - baseTokens - keptTailTokens - textEdgeTokens - SUMMARY_TEMPLATE_TOKENS;
-		if (frameBudget < snapcompact.FRAME_TOKEN_ESTIMATE) return 0;
-		// Same hard caps as #computeSnapcompactMaxFrames: a threshold-derived
-		// count above the per-request payload or provider image budget would
-		// "shrink" a huge archive to a frame count the rebuilt prompt can never
-		// attach anyway.
-		return Math.min(
-			Math.floor(frameBudget / snapcompact.FRAME_TOKEN_ESTIMATE),
-			snapcompact.MAX_FRAMES_DEFAULT,
-			snapcompact.maxFramesForDataBudget(),
-			snapcompact.providerFrameBudget(readerModel.provider),
-		);
-	}
-
-	/**
-	 * Dead-end rescue for a branch whose latest snapcompact CompactionEntry is
-	 * itself billed past the maintenance threshold
-	 * (`FRAME_TOKEN_ESTIMATE × frames`). Reaching the `!preparation` dead-end
-	 * proves everything after that entry is already kept-recent (nothing to
-	 * summarize), so the archive is the irreducible cost — and the elide/image
-	 * tiers can never touch it: `collectShakeRegions` and `dropImages()` only
-	 * inspect "message"/"custom_message" entries, so a `type: "compaction"`
-	 * entry falls through both and the session re-warns on every resume (the
-	 * shape issue #4786's rescue does not cover).
-	 *
-	 * Rebuilds the SAME archive locally — no LLM, no network — by re-running
-	 * `snapcompact.compact()` over the entry's carried-forward source text at
-	 * a maxFrames derived from the trigger threshold instead of the window:
-	 * `planArchive` truncates the oldest chars to fit, so the rebuilt entry
-	 * genuinely shrinks. The rebuilt entry keeps the stale entry's
-	 * `firstKeptEntryId`, so the kept tail is untouched, and persisting
-	 * through `appendCompaction()` lets the write-time superseded-compaction
-	 * elision drop the stale frame payload from the JSONL automatically.
-	 */
-	async #rescueSnapcompactFrameOverflow(
-		branchEntries: SessionEntry[],
-		settings: EngineCompactionSettings,
-		signal: AbortSignal,
-	): Promise<snapcompact.CompactionResult | undefined> {
-		if (signal.aborted) return undefined;
-		// Re-rendering frames needs a model that can read them: the active model
-		// when it accepts images, else the configured `modelRoles.vision` model.
-		const readerModel = this.#model?.input.includes("image")
-			? this.#model
-			: resolveSnapcompactVisionModel(this.#host.settings, this.#host.modelRegistry, this.#model);
-		if (!readerModel) return undefined;
-		const staleEntry = getLatestCompactionEntry(branchEntries);
-		if (!staleEntry) return undefined;
-		// Only rescue when the archive is the actual source of the overflow.
-		// The frame budget below charges every kept entry the rebuilt context
-		// will still carry — the kept-recent region from `firstKeptEntryId`
-		// (re-emitted before the archive by buildSessionContext) plus the
-		// entries after the archive — on top of the fixed context, mirroring
-		// what #compactionCreatedHeadroom will measure. When not even one
-		// frame fits (e.g. a huge kept tool result dominates), rebuilding
-		// would append the replacement compaction at the leaf — turning the
-		// branch tail into a compaction entry, which prepareCompaction's
-		// last-entry guard can never summarize past even after an elide
-		// shrinks the real culprit. Bail and let the elide/image tiers handle
-		// that tail instead.
-		let keptTailTokens = 0;
-		let inKeptRegion = false;
-		for (const entry of branchEntries) {
-			if (entry.id === staleEntry.firstKeptEntryId) inKeptRegion = true;
-			if (entry.id === staleEntry.id) {
-				// Everything after the archive is always kept.
-				inKeptRegion = true;
-				continue;
-			}
-			if (!inKeptRegion) continue;
-			const message = (entry as { message?: AgentMessage }).message;
-			if (message) keptTailTokens += this.#tokenizer.countMessage(message);
-		}
-		const archive = snapcompact.getPreservedArchive(staleEntry.preserveData);
-		if (!archive || archive.frames.length <= 1) return undefined;
-		const archiveText = snapcompact.archiveSourceText(archive);
-		if (!archiveText) return undefined;
-		const maxFrames = this.#computeSnapcompactRescueMaxFrames(settings, keptTailTokens, readerModel);
-		if (maxFrames < 1 || maxFrames >= archive.frames.length) return undefined;
-
-		const staleDetails = staleEntry.details as snapcompact.CompactionDetails | undefined;
-		const fileOps = snapcompact.createFileOps();
-		for (const file of staleDetails?.readFiles ?? []) fileOps.read.add(file);
-		for (const file of staleDetails?.modifiedFiles ?? []) fileOps.edited.add(file);
-		const shapeSetting = this.#host.settings.get("snapcompact.shape");
-		const shape = snapcompact.resolveShapeForText(archiveText, readerModel, shapeSetting);
-		let result: snapcompact.CompactionResult;
-		try {
-			result = await snapcompact.compact(
-				{
-					firstKeptEntryId: staleEntry.firstKeptEntryId,
-					messagesToSummarize: [],
-					turnPrefixMessages: [],
-					tokensBefore: staleEntry.tokensBefore,
-					previousSummary: staleEntry.summary,
-					previousPreserveData: staleEntry.preserveData,
-					fileOps,
-				},
-				{
-					convertToLlm,
-					model: readerModel,
-					...(shapeSetting === "auto" ? {} : { shape }),
-					maxFrames,
-				},
-			);
-		} catch (error) {
-			logger.warn("Dead-end snapcompact frame rescue failed", {
-				error: error instanceof Error ? error.message : String(error),
-			});
-			return undefined;
-		}
-		if (signal.aborted) return undefined;
-		const rebuilt = snapcompact.getPreservedArchive(result.preserveData);
-		if (!rebuilt || rebuilt.frames.length >= archive.frames.length) return undefined;
-
-		// Switch-on-success invariant: the rebuilt archive is only readable by the
-		// reader, so the session must run it before the entry is appended. A failed
-		// switch aborts the rescue WITHOUT appending (the session stays exactly as
-		// unswitched as when the rebuild bailed; the next resume may retry), so the
-		// session is never left on a model whose entry it could not read (the
-		// catch now only guards pre-switch failures (auth check, metadata refresh)).
-		if (readerModel !== this.#model) {
-			const previousModelId = this.#model?.id;
-			try {
-				await this.#host.setModelTemporary(readerModel, undefined, { role: "vision" });
-				this.#host.emitNotice(
-					"warning",
-					`snapcompact: switched active model to ${readerModel.provider}/${readerModel.id} (vision role) — ${previousModelId} cannot read image frames`,
-					"compaction",
-				);
-			} catch (error) {
-				const reason = error instanceof Error ? error.message : String(error);
-				this.#host.emitNotice(
-					"warning",
-					`snapcompact could not switch the session to ${readerModel.provider}/${readerModel.id} (vision role): ${reason}`,
-					"compaction",
-				);
-				return undefined;
-			}
-		}
-
-		const rebuiltEntryId = this.#host.sessionManager.appendCompaction(
-			result.summary,
-			result.shortSummary,
-			result.firstKeptEntryId,
-			result.tokensBefore,
-			{
-				details: result.details,
-				preserveData: result.preserveData,
-				method: "snapcompact",
-				tokensAfter: this.#projectCompactedContextTokens({
-					summary: result.summary,
-					shortSummary: result.shortSummary,
-					tokensBefore: result.tokensBefore,
-					firstKeptEntryId: result.firstKeptEntryId,
-					preserveData: result.preserveData,
-				}),
-			},
-		);
-		const sessionContext = this.#host.buildDisplaySessionContext();
-		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.rebaseAfterCompaction();
-		// Same post-rewrite bookkeeping as the regular compaction append: the
-		// rebuilt context no longer carries the transient plan reference (#1246),
-		// and advisor cursors / todo phases were derived from the replaced
-		// history.
-		this.#host.resetPlanReference();
-		this.#host.resetAdvisorRuntimes("compaction-rescue");
-		this.#host.syncTodoPhasesFromBranch();
-		this.#host.closeCodexProviderSessionsForHistoryRewrite();
-		// Extensions must see the entry that is now active, not (only) the one
-		// this rebuild just superseded — mirror the regular append path's hook.
-		const rebuiltEntry = this.#host.sessionManager.getEntries().find(e => e.id === rebuiltEntryId) as
-			| CompactionEntry
-			| undefined;
-		if (this.#host.extensionRunner && rebuiltEntry) {
-			await this.#host.extensionRunner.emit({
-				type: "session_compact",
-				compactionEntry: rebuiltEntry,
-				fromExtension: false,
-			});
-		}
-		this.#host.emitNotice(
-			"info",
-			`Compaction dead-end recovery: rebuilt the trailing snapcompact archive at a smaller frame budget (${archive.frames.length} → ${rebuilt.frames.length} frames) so maintenance could make progress.`,
-			"compaction",
-		);
-		return result;
 	}
 
 	/**
@@ -4142,11 +3894,12 @@ export class SessionMaintenance {
 		const startIndex = options.methodIndex ?? 0;
 		let methodIndex = -1;
 		let method: CompactionMethod | undefined;
-		// A text-only active model can still run snapcompact when the configured
-		// `modelRoles.vision` model can read the frames; the reader switch happens
-		// only on success, right before the commit.
-		const snapcompactVisionFallback =
-			this.#model?.input.includes("image") !== true &&
+		// Snapcompact availability is the explicit `modelRoles.vision` reader
+		// resolving with credentials — never the active model's own image
+		// capability. The reader renders the archive locally and later re-reads
+		// it through the `snapcompact_recall` sidecar; the session keeps the
+		// active conversation model throughout.
+		const snapcompactAvailable =
 			resolveSnapcompactVisionModel(this.#host.settings, this.#host.modelRegistry, this.#model) !== undefined;
 		for (let index = startIndex; index < methods.length; index++) {
 			const candidate = methods[index];
@@ -4157,7 +3910,7 @@ export class SessionMaintenance {
 					this.#model,
 					compactionSettings,
 					options.excludeMediaMethods === true,
-					snapcompactVisionFallback,
+					snapcompactAvailable,
 				)
 			)
 				continue;
@@ -4346,103 +4099,44 @@ export class SessionMaintenance {
 				// method (it tried and found nothing); skip entirely on the idle timer
 				// (it re-checks usage on its own cadence).
 				let rescueRewroteHistory = false;
-				// A snapcompact CompactionEntry is invisible to both rescue tiers
-				// below (they only inspect message entries) and to prepareCompaction
-				// itself (last-entry-is-compaction guard), so a frame archive billed
-				// past the threshold dead-ends here on every resume. Rebuild it at a
-				// threshold-derived frame budget first — but treat that as complete
-				// only when it actually created headroom: the latest archive may not
-				// be the oversized tail (e.g. a huge kept tool result after it), and
-				// declaring victory on a mere frame-count shrink would skip the
-				// elide/image tiers that can still reach that tail and suppress a
-				// warning the user should see.
-				let frameRescueResult: snapcompact.CompactionResult | undefined;
-				let frameRescueCreatedHeadroom = false;
 				if (reason !== "idle") {
-					frameRescueResult = await this.#rescueSnapcompactFrameOverflow(
-						pathEntriesForCompaction,
-						effectiveSettings,
-						autoCompactionSignal,
-					);
-					if (frameRescueResult) {
-						rescueRewroteHistory = true;
-						pathEntriesForCompaction = this.#host.sessionManager.getBranch();
-						frameRescueCreatedHeadroom = this.#compactionCreatedHeadroom();
-					}
-					if (!frameRescueCreatedHeadroom) {
-						await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
-							skipElide: fallbackFromShake,
-							hasProgress: () => {
-								// Only reached when a tier actually freed something, so the
-								// branch has been rewritten either way.
-								rescueRewroteHistory = true;
-								pathEntriesForCompaction = this.#host.sessionManager.getBranch();
-								preparation = prepareCompaction(
-									pathEntriesForCompaction,
-									effectiveSettings,
-									this.#model,
-									this.#tokenizer,
-								);
-								return preparation !== undefined;
-							},
-						});
-					}
+					await this.#rescueCompactionDeadEnd(autoCompactionSignal, {
+						skipElide: fallbackFromShake,
+						hasProgress: () => {
+							// Only reached when a tier actually freed something, so the
+							// branch has been rewritten either way.
+							rescueRewroteHistory = true;
+							pathEntriesForCompaction = this.#host.sessionManager.getBranch();
+							preparation = prepareCompaction(
+								pathEntriesForCompaction,
+								effectiveSettings,
+								this.#model,
+								this.#tokenizer,
+							);
+							return preparation !== undefined;
+						},
+					});
 				}
 				if (!preparation) {
-					const noProgressDeadEnd = reason !== "idle" && !frameRescueCreatedHeadroom;
-					const implicatedFrames =
-						frameRescueResult && !frameRescueCreatedHeadroom
-							? (snapcompact.getPreservedArchive(frameRescueResult.preserveData)?.frames.length ?? 0)
-							: 0;
+					const noProgressDeadEnd = reason !== "idle";
 					const deadEndWarning = noProgressDeadEnd
-						? compactionDeadEndWarning(
-								this.#deadEndRemedies("shrink it (e.g. clear large tool output)", implicatedFrames),
-							)
+						? compactionDeadEndWarning("shrink it (e.g. clear large tool output)")
 						: undefined;
-					// A rescue that appended a rebuilt archive without creating
-					// headroom must carry the dead-end badge on the entry the
-					// transcript actually shows (the rebuilt one), or the pause
-					// loses its explanation once the notice scrolls away. Stamp it
-					// BEFORE the auto_compaction_end event: a result-carrying event
-					// makes the TUI rebuild the chat from the current entries
-					// immediately, so a later stamp would not appear until some
-					// unrelated rebuild.
-					if (deadEndWarning && frameRescueResult) {
-						const stampEntry = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
-						if (stampEntry) {
-							stampEntry.warning = deadEndWarning;
-							await this.#host.sessionManager.rewriteEntries();
-						}
-					}
-					// A successful frame rescue rewrote history and activated a new
-					// compaction entry — surface it as a real (non-skipped) result so
-					// the TUI rebuilds the transcript instead of treating the pass as
-					// a benign no-op.
 					await this.#emitLifecycleEvent(
 						{
 							type: "auto_compaction_end",
 							action,
-							result: frameRescueResult && {
-								...frameRescueResult,
-								preserveData: snapcompact.stripPreservedArchive(frameRescueResult.preserveData),
-							},
+							result: undefined,
 							aborted: false,
 							willRetry: false,
-							skipped: frameRescueResult === undefined,
+							skipped: true,
 						},
 						options.detachPostCommit === true,
 					);
 					let continuationScheduled = false;
-					if (frameRescueCreatedHeadroom) {
-						continuationScheduled = this.#host.scheduleCompactionContinuation({
-							generation,
-							autoContinue: shouldAutoContinue,
-							terminalTextAnswer,
-							suppressContinuation,
-						});
-					} else if (!suppressContinuation && this.#host.agent.hasQueuedMessages()) {
+					if (!suppressContinuation && this.#host.agent.hasQueuedMessages()) {
 						this.#host.scheduleAgentContinue({
-							source: "frame-rescue-queued-message",
+							source: "dead-end-queued-message",
 							delayMs: 100,
 							generation,
 							shouldContinue: () => this.#host.agent.hasQueuedMessages(),
@@ -4563,15 +4257,17 @@ export class SessionMaintenance {
 			// leaves no fallback.
 			let snapcompactResult: snapcompact.CompactionResult | undefined;
 			let snapcompactBlocker: string | undefined;
-			// The reader for this pass: the active model when it can read images,
-			// else the configured `modelRoles.vision` model. Declared outside the
-			// action block because the commit tail switches the session to it on
-			// success (same invariant as the manual path).
+			// The reader for this pass: the explicitly configured `modelRoles.vision`
+			// model — never the active model's own image capability. It renders the
+			// archive locally and later re-reads it through the `snapcompact_recall`
+			// sidecar; the session keeps the active conversation model throughout.
 			let snapcompactReader: Model | undefined;
 			if (action === "snapcompact" && compactionPrep.kind !== "fromHook") {
-				snapcompactReader = this.#model?.input.includes("image")
-					? this.#model
-					: resolveSnapcompactVisionModel(this.#host.settings, this.#host.modelRegistry, this.#model);
+				snapcompactReader = resolveSnapcompactVisionModel(
+					this.#host.settings,
+					this.#host.modelRegistry,
+					this.#model,
+				);
 				if (!snapcompactReader) {
 					// No reader means the committed archive would be unreadable. Set
 					// the blocker before any serialize/shape work so the existing
@@ -4908,33 +4604,6 @@ export class SessionMaintenance {
 				tokensBefore = compactResult.tokensBefore;
 				details = compactResult.details;
 				preserveData = mergeLlmCompactionPreserveData(compactionPrep.preserveData, compactResult.preserveData);
-			}
-
-			// Switch-on-success invariant (mirrors the manual path): the committed
-			// frame archive is only readable by the reader, so the session must run
-			// it before the compaction entry lands. Local blockers threw earlier —
-			// before any switch — and a failed switch throws here, into the outer
-			// catch which advances to the next preferred method while the session
-			// is still unswitched (the catch now only guards pre-switch failures
-			// (auth check, metadata refresh)). Settings are never mutated.
-			if (snapcompactResult && snapcompactReader && snapcompactReader !== this.#model) {
-				const previousModelId = this.#model?.id;
-				try {
-					await this.#host.setModelTemporary(snapcompactReader, undefined, { role: "vision" });
-					this.#host.emitNotice(
-						"warning",
-						`snapcompact: switched active model to ${snapcompactReader.provider}/${snapcompactReader.id} (vision role) — ${previousModelId} cannot read image frames`,
-						"compaction",
-					);
-				} catch (error) {
-					const reason = error instanceof Error ? error.message : String(error);
-					this.#host.emitNotice(
-						"warning",
-						`snapcompact could not switch the session to ${snapcompactReader.provider}/${snapcompactReader.id} (vision role): ${reason}`,
-						"compaction",
-					);
-					throw error;
-				}
 			}
 
 			return await this.#commitAutoCompactionResult({
