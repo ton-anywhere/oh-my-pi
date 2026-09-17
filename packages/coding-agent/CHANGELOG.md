@@ -40,7 +40,7 @@
 - Added V8 `.cpuprofile` support to the read tool (Node/Bun `--cpu-prof`, Chrome DevTools, CDP `Profiler.stop` output): reads now return a compact bottleneck summary — hot-path call tree with on-CPU milliseconds (`(idle)` time excluded), collapsed pass-through chains, flattened direct recursion, shortened file URLs, and a top-functions-by-self-time table. `:raw` still reads the original JSON, and files that merely carry the extension fall back to plain text.
 - Added separate Advisor cost visibility to the status line, rendering primary and Advisor spend as `$2.67 (sub) + $0.41 (adv)` while keeping already-incurred Advisor cost across runtime disablement and same-session history rewrites.
 - Added a configurable per-request timeout for the `inspect_image` tool (`inspect_image.timeoutMs`, default 5 minutes; set to 0 to disable) so a stalled vision-model provider fails fast with a clear error instead of blocking until manual abort ([#4165](https://github.com/can1357/oh-my-pi/issues/4165)).
-- Snapcompact falls back to the configured `modelRoles.vision` model when the active model is text-only, switching the session to it so archived frames stay readable after compaction.
+- Snapcompact no longer switches the session to a vision model: archived frames stay out of the conversation context, and a hidden `snapcompact_recall` tool lets the active model ask focused questions about the archive, answered by the explicitly configured `modelRoles.vision` model. `modelRoles.vision` is now required for snapcompact to be available, even when the active model accepts images.
 
 ### Changed
 
