@@ -44,11 +44,10 @@ export type SnapcompactSavingsSink = (
 	model: Model,
 ) => void;
 
-// Per-provider image-count budgets live in @oh-my-pi/snapcompact
-// (`providerImageBudget`): snapcompact frames are 1568px (<2000px) so
-// dimension/size limits never bind; only COUNT does. Once the budget is
-// spent by already-attached archive/system-prompt images, tool results ship
-// verbatim as text.
+// Per-model image-count budgets live in @oh-my-pi/snapcompact. Snapcompact
+// frames are 1568px (<2000px), so dimension/size limits never bind; only
+// count does. Once the budget is spent by already-attached images, tool
+// results ship verbatim as text.
 const MAX_SYSTEM_PROMPT_FRAMES = 6;
 /** Tool results under this many tokens are never rasterized — the swap can't
  *  save enough to justify trading crisp text for an image. */
@@ -318,7 +317,7 @@ export function estimateInlineSavings(input: {
 	const shape = snapcompact.resolveShape(model, options.shape);
 	const tokenizer = new Tokenizer(model);
 	const existingImages = countMessageImages(input.messages);
-	const budget = snapcompact.providerImageBudget(model.provider) - existingImages;
+	const budget = snapcompact.modelImageBudget(model) - existingImages;
 
 	const candidates: InlineToolResultCandidate[] = [];
 	if (options.renderToolResults) {
@@ -443,7 +442,7 @@ export class SnapcompactInlineTransformer {
 
 		const shape = snapcompact.resolveShape(model, this.options.shape);
 		const tokenizer = new Tokenizer(model);
-		const budget = snapcompact.providerImageBudget(model.provider) - countMessageImages(context.messages);
+		const budget = snapcompact.modelImageBudget(model) - countMessageImages(context.messages);
 		if (budget <= 0) return context;
 
 		const messages = [...context.messages];

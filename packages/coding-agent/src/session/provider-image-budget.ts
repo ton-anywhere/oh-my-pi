@@ -13,7 +13,7 @@ import type {
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import { providerImageBudget } from "@oh-my-pi/snapcompact";
+import { modelImageBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
 import { imageDecodeFailureReason } from "../utils/image-loading";
 
@@ -72,7 +72,7 @@ function clampToolResultMessage(message: ToolResultMessage, state: { remainingDr
 /** Drops oldest transient image blocks so outgoing vision requests fit the active provider's image cap. */
 export function clampProviderContextImages(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
-	const limit = providerImageBudget(model.provider);
+	const limit = modelImageBudget(model);
 	const totalImages = countImages(context);
 	if (totalImages <= limit) return context;
 

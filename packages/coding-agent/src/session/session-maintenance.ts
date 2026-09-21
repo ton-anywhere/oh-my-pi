@@ -3472,7 +3472,7 @@ export class SessionMaintenance {
 			return Math.min(
 				snapcompact.MAX_FRAMES_DEFAULT,
 				snapcompact.maxFramesForDataBudget(),
-				snapcompact.providerFrameBudget(readerModel.provider),
+				snapcompact.modelFrameBudget(readerModel),
 			);
 		}
 		const reserve = effectiveReserveTokens(ctxWindow, settings);
@@ -3515,7 +3515,7 @@ export class SessionMaintenance {
 			Math.floor(frameBudget / snapcompact.FRAME_TOKEN_ESTIMATE),
 			snapcompact.MAX_FRAMES_DEFAULT,
 			snapcompact.maxFramesForDataBudget(),
-			snapcompact.providerFrameBudget(readerModel.provider),
+			snapcompact.modelFrameBudget(readerModel),
 		);
 	}
 

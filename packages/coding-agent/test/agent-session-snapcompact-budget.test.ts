@@ -21,6 +21,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { effectiveReserveTokens, prepareCompaction } from "@oh-my-pi/pi-agent-core/compaction";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -36,6 +37,20 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 	let sessionManager: SessionManager;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
+
+	/**
+	 * Point the `modelRoles.vision` reader at a specific model instance. The
+	 * frame budget is sized from the reader, so tests that need an unusual
+	 * reader window or capability swap the exact-match catalog row.
+	 */
+	function setVisionReader(reader: Model): void {
+		const available = modelRegistry.getAvailable();
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([
+			...available.filter(model => !(model.provider === reader.provider && model.id === reader.id)),
+			reader,
+		]);
+		session.settings.setModelRole("vision", `${reader.provider}/${reader.id}`);
+	}
 
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
@@ -100,6 +115,10 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 			}),
 			modelRegistry,
 		});
+		// Snapcompact availability is decided solely by the explicitly
+		// configured vision reader; default it to the pinned active model so
+		// the budget math below stays under test.
+		setVisionReader(model);
 	});
 
 	afterEach(async () => {
@@ -242,6 +261,8 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		const model = session.model;
 		if (!model) throw new Error("Expected model");
 		session.agent.setModel({ ...model, contextWindow: 0 });
+		// The frame cap follows the reader's window, not the active model's.
+		setVisionReader({ ...model, contextWindow: 0 });
 
 		const branchEntries = sessionManager.getBranch();
 		const lastEntry = branchEntries[branchEntries.length - 1];
@@ -266,6 +287,8 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		const model = session.model;
 		if (!model) throw new Error("Expected model");
 		session.agent.setModel({ ...model, provider: "ramp", contextWindow: 500_000 });
+		authStorage.setRuntimeApiKey("ramp", "test-key");
+		setVisionReader({ ...model, provider: "ramp", contextWindow: 500_000 });
 
 		const branchEntries = sessionManager.getBranch();
 		const lastEntry = branchEntries[branchEntries.length - 1];
@@ -285,6 +308,51 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+	});
+
+	it("caps maxFrames at the reader's explicit image capability when the vision role is a local llama.cpp model", async () => {
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!bundled) throw new Error("Expected bundled claude-sonnet-4-5 model");
+		// A llama.cpp-discovered reader: image input plus the conservative
+		// explicit capability the discovery mapper stamps.
+		const readerModel = {
+			...bundled,
+			provider: "custom-vision",
+			id: "reader-20",
+			contextWindow: 0,
+			maxImageInputs: 20,
+		};
+		authStorage.setRuntimeApiKey("custom-vision", "test-key");
+		setVisionReader(readerModel);
+
+		const branchEntries = sessionManager.getBranch();
+		const lastEntry = branchEntries[branchEntries.length - 1];
+		if (!lastEntry?.id) throw new Error("Expected branch entry with id");
+		const compactSpy = vi.spyOn(snapcompact, "compact").mockResolvedValue({
+			summary: "stubbed snapcompact",
+			shortSummary: "stub",
+			firstKeptEntryId: lastEntry.id,
+			tokensBefore: 100_000,
+			details: { readFiles: [], modifiedFiles: [] },
+			preserveData: {
+				snapcompact: { frames: [], totalChars: 0, truncatedChars: 0 },
+			},
+		});
+
+		await session.compact(undefined, { mode: "snapcompact" });
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		const opts = compactSpy.mock.calls[0]?.[1];
+		// Reader capability (20) must beat the unknown-remote floor (5) while
+		// the byte-budget frame cap still wins over both.
+		expect(opts?.model).toMatchObject({ provider: "custom-vision", id: "reader-20", maxImageInputs: 20 });
+		expect(opts?.maxFrames).toBe(
+			Math.min(
+				snapcompact.MAX_FRAMES_DEFAULT,
+				snapcompact.maxFramesForDataBudget(),
+				snapcompact.modelFrameBudget(readerModel),
+			),
+		);
 	});
 
 	it("keeps the frame archive out of the RPC result after persisting it", async () => {

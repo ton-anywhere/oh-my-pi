@@ -55,6 +55,7 @@ function makeModel(
 		input?: ("text" | "image")[];
 		api?: "anthropic-messages" | "google-generative-ai";
 		baseUrl?: string;
+		maxImageInputs?: number;
 	} = {},
 ) {
 	return buildModel({
@@ -68,6 +69,7 @@ function makeModel(
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 200_000,
 		maxTokens: 8_192,
+		...(overrides.maxImageInputs === undefined ? {} : { maxImageInputs: overrides.maxImageInputs }),
 	});
 }
 
@@ -434,6 +436,29 @@ describe("SnapcompactInlineTransformer", () => {
 		expect(imageCount(result)).toBeLessThanOrEqual(5);
 		expect(result.messages[3]).toBe(context.messages[3]);
 		expect(result.messages[4]).toBe(context.messages[4]);
+	});
+
+	it("honors an explicit model image capability when planning inline swaps", async () => {
+		const transformer = new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+		);
+		const context: Context = {
+			messages: [
+				userMessage("go"),
+				toolResult("call_1", LARGE),
+				toolResult("call_2", LARGE),
+				toolResult("call_3", LARGE),
+				toolResult("call_4", LARGE),
+			],
+		};
+		// The stamped capability (20) admits three 2-frame swaps; the planner
+		// always keeps the freshest tool result as text. The unknown-remote
+		// floor (5) would only admit two.
+		const result = await transformer.transform(
+			context,
+			makeModel({ provider: "llama-server-small", maxImageInputs: 20 }),
+		);
+		expect(imageCount(result)).toBe(6);
 	});
 
 	it("truthfully skips swaps when source images consume the provider budget", async () => {

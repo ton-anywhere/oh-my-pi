@@ -32,11 +32,13 @@
  *   area-proportional, so resolution cannot improve chars/$ — 1568 stays.
  *   `detail: "high"` would downgrade (2,500-patch cap); `original` is sent.
  * - **Unknown providers** default to `8on22-bw` with Anthropic-style
- *   visual-token area billing. `providerImageBudget` still caps per-request
- *   images per provider so inline imaging cannot flood a request with
- *   attachments, but the old OpenRouter-specific 8-image cap is gone; routers
- *   now use the same permissive budget as direct Anthropic/Claude lines unless
- *   configured otherwise upstream.
+ *   visual-token area billing. `modelImageBudget` uses a model's explicit
+ *   capability first, then provider policy, then the safe unknown floor, so
+ *   local discovery can be conservative without weakening unknown remotes.
+ *   Inline imaging cannot flood a request with attachments, but the old
+ *   OpenRouter-specific 8-image cap is gone; routers now use the same
+ *   permissive budget as direct Anthropic/Claude lines unless configured
+ *   otherwise upstream.
  *
  * The whole pass is local and deterministic — no LLM call, no API key, no
  * latency beyond rendering. Rasterization and PNG encoding happen in native
@@ -45,7 +47,7 @@
  * re-attached to the compaction summary message on every context rebuild.
  */
 
-import type { Api, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
+import type { Api, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { classifyModel, compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
 import { renderSnapcompactPng, snapcompactSupportedChars } from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, prompt } from "@oh-my-pi/pi-utils";
@@ -500,9 +502,7 @@ export function frameDataBytes(frames: readonly Pick<Frame, "data">[]): number {
 /**
  * Per-request image-count budgets by provider id. These cap how many images an
  * entire request may carry (archive/system-prompt/tool-result imaging combined).
- * The values are conservative policy caps under the vendor hard limits
- * (Anthropic 100, OpenAI 500, Gemini ~2500); unknown providers fall to a safe
- * floor rather than sending unbounded attachments.
+ * Explicit model capabilities take precedence; provider values are fallbacks.
  */
 export const PROVIDER_IMAGE_BUDGETS: Record<string, number> = {
 	anthropic: 90,
@@ -519,14 +519,18 @@ export const PROVIDER_IMAGE_BUDGETS: Record<string, number> = {
 /** Safe floor for unknown providers (strictest mainstream measured: Groq ~5). */
 export const DEFAULT_PROVIDER_IMAGE_BUDGET = 5;
 
-/** Per-request image budget for `provider`; unknown providers get the floor. */
-export function providerImageBudget(provider: string | undefined): number {
-	return (provider !== undefined ? PROVIDER_IMAGE_BUDGETS[provider] : undefined) ?? DEFAULT_PROVIDER_IMAGE_BUDGET;
+/** Per-request image budget for a model; unknown providers get the floor. */
+export function modelImageBudget(model: Pick<Model, "provider" | "maxImageInputs"> | undefined): number {
+	return (
+		model?.maxImageInputs ??
+		(model?.provider !== undefined ? PROVIDER_IMAGE_BUDGETS[model.provider] : undefined) ??
+		DEFAULT_PROVIDER_IMAGE_BUDGET
+	);
 }
 
-/** Archive frame cap for `provider`: image budget, never above {@link MAX_FRAMES_DEFAULT}. */
-export function providerFrameBudget(provider: string | undefined): number {
-	return Math.min(providerImageBudget(provider), MAX_FRAMES_DEFAULT);
+/** Archive frame cap for a model: image budget, never above {@link MAX_FRAMES_DEFAULT}. */
+export function modelFrameBudget(model: Pick<Model, "provider" | "maxImageInputs"> | undefined): number {
+	return Math.min(modelImageBudget(model), MAX_FRAMES_DEFAULT);
 }
 
 /** Key under `CompactionEntry.preserveData` holding the frame archive. */

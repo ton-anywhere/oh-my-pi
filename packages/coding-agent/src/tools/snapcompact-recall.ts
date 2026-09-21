@@ -68,7 +68,7 @@ export class SnapcompactRecallTool implements AgentTool<typeof schema> {
 		}
 		const frameBytes = imageBlocks.reduce((total, block) => total + block.data.length, 0);
 		if (
-			imageBlocks.length > snapcompact.providerImageBudget(model.provider) ||
+			imageBlocks.length > snapcompact.modelImageBudget(model) ||
 			frameBytes > snapcompact.FRAME_DATA_BYTES_BUDGET
 		) {
 			throw new ToolError(

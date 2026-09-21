@@ -1206,21 +1206,23 @@ describe("archive helpers", () => {
 		expect((blocks[2] as { text: string }).text).toContain("tail text");
 	});
 
-	it("provider image budgets stay permissive while unknown providers keep the safe floor", () => {
-		expect(snapcompact.providerImageBudget("openrouter")).toBe(90);
-		expect(snapcompact.providerImageBudget("umans")).toBe(10);
-		// Unknown providers fall to the safe floor.
-		expect(snapcompact.providerImageBudget(undefined)).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
-		expect(snapcompact.providerImageBudget("some-new-router")).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
-		expect(snapcompact.providerImageBudget("openai-codex")).toBe(200);
-		expect(snapcompact.providerFrameBudget("some-new-router")).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
-		expect(snapcompact.providerFrameBudget("umans")).toBe(10);
-		expect(snapcompact.providerFrameBudget("anthropic")).toBe(snapcompact.MAX_FRAMES_DEFAULT);
+	it("model image budgets prefer explicit capability while unknown providers keep the safe floor", () => {
+		const model = (provider: string, maxImageInputs?: number) => ({ provider, maxImageInputs });
+		expect(snapcompact.modelImageBudget(model("openrouter"))).toBe(90);
+		expect(snapcompact.modelImageBudget(model("umans"))).toBe(10);
+		expect(snapcompact.modelImageBudget(undefined)).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+		expect(snapcompact.modelImageBudget(model("some-new-router"))).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+		expect(snapcompact.modelImageBudget(model("openai-codex"))).toBe(200);
+		// Explicit capability wins even when the custom provider id collides with a hosted key.
+		expect(snapcompact.modelImageBudget(model("openrouter", 20))).toBe(20);
+		expect(snapcompact.modelFrameBudget(model("some-new-router"))).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+		expect(snapcompact.modelFrameBudget(model("umans"))).toBe(10);
+		expect(snapcompact.modelFrameBudget(model("anthropic"))).toBe(snapcompact.MAX_FRAMES_DEFAULT);
 		// Anthropic's image cap is the high-water mark the default frame count
 		// must stay under; unknown providers are clamped separately via
-		// providerFrameBudget so their lower image floors cannot archive frames
+		// modelFrameBudget so their lower image floors cannot archive frames
 		// the send path will drop.
-		expect(snapcompact.MAX_FRAMES_DEFAULT).toBeLessThanOrEqual(snapcompact.providerImageBudget("anthropic"));
+		expect(snapcompact.MAX_FRAMES_DEFAULT).toBeLessThanOrEqual(snapcompact.modelImageBudget(model("anthropic")));
 	});
 });
 

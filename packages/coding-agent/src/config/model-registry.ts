@@ -1307,17 +1307,20 @@ export class ModelRegistry {
 	}
 
 	#normalizeDiscoverableModels(providerConfig: DiscoveryProviderConfig, models: Model<Api>[]): Model<Api>[] {
-		const withDecoderMetadata =
-			providerConfig.discovery.type === "ollama" ||
-			providerConfig.discovery.type === "llama.cpp" ||
-			providerConfig.discovery.type === "lm-studio"
-				? models.map(model =>
-						buildModel({ ...model, imageInputDecoder: "stb", compat: model.compatConfig } as ModelSpec<Api>),
-					)
-				: models;
+		const withRuntimeMetadata = models.map(model => {
+			const metadata =
+				providerConfig.discovery.type === "llama.cpp"
+					? { imageInputDecoder: "stb" as const, maxImageInputs: 20 }
+					: providerConfig.discovery.type === "ollama" || providerConfig.discovery.type === "lm-studio"
+						? { imageInputDecoder: "stb" as const }
+						: {};
+			return Object.keys(metadata).length > 0
+				? buildModel({ ...model, ...metadata, compat: model.compatConfig } as ModelSpec<Api>)
+				: model;
+		});
 
 		const withRemoteCompaction = providerConfig.remoteCompaction
-			? withDecoderMetadata.map(model =>
+			? withRuntimeMetadata.map(model =>
 					buildModel({
 						...model,
 						remoteCompaction: mergeProviderRemoteCompactionConfig(
@@ -1327,7 +1330,7 @@ export class ModelRegistry {
 						compat: model.compatConfig,
 					} as ModelSpec<Api>),
 				)
-			: withDecoderMetadata;
+			: withRuntimeMetadata;
 
 		if (providerConfig.provider !== "ollama" || providerConfig.api !== "openai-responses") {
 			return withRemoteCompaction;

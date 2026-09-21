@@ -1177,6 +1177,12 @@ export interface Model<TApi extends Api = Api> {
 	tokenizer?: ModelTokenizer;
 	input: ("text" | "image")[];
 	/**
+	 * Conservative per-request image-count ceiling reported by the model
+	 * source. Consumers fall back to provider policy, then the unknown-provider
+	 * floor, when this is absent.
+	 */
+	maxImageInputs?: number;
+	/**
 	 * Decoder family used for image inputs when it has narrower format support
 	 * than OMP's general image pipeline. `stb` local backends reject WebP.
 	 */

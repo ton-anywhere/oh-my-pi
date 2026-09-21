@@ -1600,6 +1600,79 @@ providers:
 		expect(llama?.input).toEqual(["text", "image"]);
 	});
 
+	test("llama.cpp discovery stamps conservative image capability on nonstandard provider ids", async () => {
+		writeRawModelsJson({
+			"local-vision": {
+				baseUrl: "http://127.0.0.1:8081",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "llama.cpp" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:8081/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "qwen3-vl-8b",
+								architecture: {
+									input_modalities: ["text", "image"],
+									output_modalities: ["text"],
+								},
+								meta: { n_ctx: 32768 },
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "http://127.0.0.1:8081/props") {
+				return new Response(JSON.stringify({ default_generation_settings: { n_ctx: 32768 } }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const fresh = registry.find("local-vision", "qwen3-vl-8b");
+		if (!fresh) throw new Error("expected freshly discovered llama.cpp model");
+		expect(fresh.input).toEqual(["text", "image"]);
+		expect(fresh.maxImageInputs).toBe(20);
+
+		const cachedRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		const cached = cachedRegistry.find("local-vision", "qwen3-vl-8b");
+		if (!cached) throw new Error("expected cached llama.cpp model to be normalized");
+		expect(cached.maxImageInputs).toBe(20);
+
+		writeRawModelsJson({
+			"generic-remote": {
+				baseUrl: "http://127.0.0.1:9993",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const genericFetch: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9993/v1/models") {
+				return new Response(JSON.stringify({ data: [{ id: "generic-vision" }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const genericRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: genericFetch });
+		await genericRegistry.refresh();
+		const generic = genericRegistry.find("generic-remote", "generic-vision");
+		if (!generic) throw new Error("expected generic OpenAI-compatible model");
+		expect(generic.maxImageInputs).toBeUndefined();
+	});
+
 	test("llama.cpp discovery ignores positive props defaults as per-request limits, not hard caps", async () => {
 		const fetchMock: FetchImpl = async input => {
 			const url = String(input);

@@ -152,4 +152,65 @@ describe("provider context image budgets", () => {
 
 		expect(clampProviderContextImages(context, UMANS_MODEL)).toBe(context);
 	});
+
+	it("keeps the unknown-remote floor when the model carries no explicit image capability", () => {
+		const unknown = buildModel({
+			id: "unknown-vision",
+			name: "unknown-vision",
+			api: "openai-completions",
+			provider: "some-new-router",
+			baseUrl: "https://api.some-new-router.example",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 4096,
+		});
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{
+					role: "user",
+					content: Array.from({ length: 15 }, (_, index) => image(`image-${index}`)),
+					timestamp: 1,
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, unknown);
+
+		// 15 images over the safe unknown floor of 5: only the newest five survive.
+		expect(imageData(clamped)).toEqual(Array.from({ length: 5 }, (_, index) => `image-${index + 10}`));
+	});
+
+	it("honors an explicit model image capability above the unknown floor", () => {
+		const local = buildModel({
+			id: "qwen3-vl-8b",
+			name: "qwen3-vl-8b",
+			api: "openai-completions",
+			provider: "llama-server-small",
+			baseUrl: "http://127.0.0.1:8081/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32768,
+			maxTokens: 4096,
+			maxImageInputs: 20,
+		});
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{
+					role: "user",
+					content: Array.from({ length: 15 }, (_, index) => image(`image-${index}`)),
+					timestamp: 1,
+				},
+			],
+		};
+
+		// 15 images fit the stamped capability of 20: nothing is dropped.
+		expect(clampProviderContextImages(context, local)).toBe(context);
+	});
 });
