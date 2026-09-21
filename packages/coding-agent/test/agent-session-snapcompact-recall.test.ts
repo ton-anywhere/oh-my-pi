@@ -723,7 +723,6 @@ describe("AgentSession snapcompact vision recall", () => {
 		const reopened = await SessionManager.open(jsonlPath, tempDir!.path(), undefined, {
 			initialCwd: tempDir!.path(),
 		});
-		let replaySessionRef: AgentSession;
 		const replayToolSession: ToolSession = {
 			cwd: tempDir!.path(),
 			hasUI: false,
@@ -732,8 +731,8 @@ describe("AgentSession snapcompact vision recall", () => {
 			settings: harness.settings,
 			modelRegistry: harness.modelRegistry,
 			sessionManager: reopened,
-			getActiveModel: () => replaySessionRef.model,
-			getSessionId: () => replaySessionRef.sessionId,
+			getActiveModel: () => replaySession.model,
+			getSessionId: () => replaySession.sessionId,
 			getTelemetry: () => undefined,
 		} as unknown as ToolSession;
 		const replayAgent = new Agent({
@@ -746,7 +745,6 @@ describe("AgentSession snapcompact vision recall", () => {
 			modelRegistry: harness.modelRegistry,
 			createSnapcompactRecallTool: async () => (await HIDDEN_TOOLS.snapcompact_recall(replayToolSession)) ?? null,
 		});
-		replaySessionRef = replaySession;
 		replaySessions.push(replaySession);
 		// Load the persisted conversation into the agent — the same seam switchSession
 		// uses when resuming (buildDisplaySessionContext + replaceMessages).
@@ -771,4 +769,91 @@ describe("AgentSession snapcompact vision recall", () => {
 		expect(replayResult.toolName).toBe("snapcompact_recall");
 		expect(allTextIn([replayResult])).toContain(UNIQUE_FACT);
 	}, 60_000);
+
+	it("admits a multi-frame archive under the reader's explicit image capability", async () => {
+		const activeModel = getBundledModel("aimlapi", "alibaba/qwen3-coder-480b-a35b-instruct");
+		if (!activeModel) throw new Error("Expected bundled text-only model");
+		const harness = await createHarness({
+			seedMessages: [
+				{ role: "user", content: `I ran the deploy script. ${"alpha ".repeat(40_000)}`, timestamp: Date.now() },
+				{
+					role: "assistant",
+					content: [{ type: "text", text: `The deploy failed with error ${UNIQUE_FACT}. Try running with sudo.` }],
+					api: activeModel.api,
+					provider: activeModel.provider,
+					model: activeModel.id,
+					stopReason: "stop",
+					usage: {
+						input: 10,
+						output: 10,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 20,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					timestamp: Date.now(),
+				},
+				{ role: "user", content: "second question", timestamp: Date.now() },
+			],
+		});
+		const reader = {
+			...(getBundledModel("aimlapi", "claude-sonnet-4-5-20250929") as Model),
+			provider: "llama-server-small",
+			id: "qwen3-vl-8b",
+			maxImageInputs: 20,
+		};
+		authStorage!.setRuntimeApiKey("llama-server-small", "test-key");
+		const available = harness.modelRegistry.getAvailable();
+		vi.spyOn(harness.modelRegistry, "getAvailable").mockReturnValue([
+			...available.filter(model => !(model.provider === reader.provider && model.id === reader.id)),
+			reader,
+		]);
+		harness.settings.setModelRole("vision", `${reader.provider}/${reader.id}`);
+
+		await harness.session.compact(undefined, { mode: "snapcompact" });
+		const compaction = harness.sessionManager.getBranch().find(entry => entry.type === "compaction");
+		const archive = snapcompact.getPreservedArchive(compaction!.preserveData);
+		// The explicit 20-image capability must admit an archive the unknown-provider
+		// floor of 5 would reject.
+		expect(archive?.frames.length ?? 0).toBeGreaterThan(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+
+		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(sidecarAnswer());
+		const tool = new SnapcompactRecallTool(harness.toolSession);
+		await tool.execute("call-frames", { query: "What error did the deploy fail with?" });
+
+		const [, ctx] = completeSpy.mock.calls[0] as [Model, Context];
+		const first = ctx.messages[0];
+		if (!first || first.role !== "user" || typeof first.content === "string") {
+			throw new Error("Expected the archive as the first sidecar message");
+		}
+		expect(first.content.filter(block => block.type === "image")).toHaveLength(archive!.frames.length);
+	}, 60_000);
+
+	it("sends the vision role thinking level as the sidecar reasoning effort", async () => {
+		const harness = await createHarness({ visionRole: "aimlapi/claude-sonnet-4-5-20250929:low" });
+		await harness.session.compact(undefined, { mode: "snapcompact" });
+		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(sidecarAnswer());
+
+		const tool = new SnapcompactRecallTool(harness.toolSession);
+		await tool.execute("call-thinking-low", { query: "What error did the deploy fail with?" });
+
+		expect(completeSpy).toHaveBeenCalledTimes(1);
+		const options = completeSpy.mock.calls[0]?.[2] as { reasoning?: string; disableReasoning?: boolean } | undefined;
+		expect(options?.reasoning).toBe("low");
+		expect(options?.disableReasoning).toBe(false);
+	});
+
+	it("disables sidecar reasoning when the vision role selector is off", async () => {
+		const harness = await createHarness({ visionRole: "aimlapi/claude-sonnet-4-5-20250929:off" });
+		await harness.session.compact(undefined, { mode: "snapcompact" });
+		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(sidecarAnswer());
+
+		const tool = new SnapcompactRecallTool(harness.toolSession);
+		await tool.execute("call-thinking-off", { query: "What error did the deploy fail with?" });
+
+		expect(completeSpy).toHaveBeenCalledTimes(1);
+		const options = completeSpy.mock.calls[0]?.[2] as { reasoning?: string; disableReasoning?: boolean } | undefined;
+		expect(options?.reasoning).toBeUndefined();
+		expect(options?.disableReasoning).toBe(true);
+	});
 });

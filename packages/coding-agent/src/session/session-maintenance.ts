@@ -97,7 +97,7 @@ import {
 	resolveCompactionConfiguredTarget,
 	resolveContextPromotionConfiguredTarget,
 	resolveRoleModelFull,
-	resolveSnapcompactVisionModel,
+	resolveSnapcompactVisionSelection,
 } from "./role-models";
 import type { SessionContext } from "./session-context";
 import {
@@ -1109,11 +1109,11 @@ export class SessionMaintenance {
 			// reader renders the archive locally and later re-reads it through
 			// the `snapcompact_recall` sidecar; the session keeps the active
 			// conversation model throughout.
-			const snapcompactReader = resolveSnapcompactVisionModel(
+			const snapcompactReader = resolveSnapcompactVisionSelection(
 				this.#host.settings,
 				this.#host.modelRegistry,
 				activeModel,
-			);
+			)?.model;
 			let selectedMethod: CompactionMethod | undefined;
 			for (let index = methodOffset; index < methods.length; index++) {
 				const method = methods[index];
@@ -2044,7 +2044,7 @@ export class SessionMaintenance {
 		// Snapcompact availability is the explicit `modelRoles.vision` reader
 		// resolving with credentials (mirrors the auto-path availability arm).
 		const snapcompactAvailable =
-			resolveSnapcompactVisionModel(this.#host.settings, this.#host.modelRegistry, model) !== undefined;
+			resolveSnapcompactVisionSelection(this.#host.settings, this.#host.modelRegistry, model) !== undefined;
 		const method = resolveSpeculationMethod(model, settings, snapcompactAvailable);
 		if (!method) return;
 		this.#startSpeculationRun(contextTokens, method);
@@ -2092,7 +2092,7 @@ export class SessionMaintenance {
 		const model = this.#model;
 		if (!model) return false;
 		const snapcompactAvailable =
-			resolveSnapcompactVisionModel(this.#host.settings, this.#host.modelRegistry, model) !== undefined;
+			resolveSnapcompactVisionSelection(this.#host.settings, this.#host.modelRegistry, model) !== undefined;
 		const method = resolveSpeculationMethod(model, settings, snapcompactAvailable);
 		if (!method) return false;
 		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
@@ -2777,8 +2777,7 @@ export class SessionMaintenance {
 		// method-order loop (moot when `excludeMediaForPayloadRejection` is set:
 		// snapcompact is excluded there regardless of the reader).
 		const payloadSnapcompactVisionFallback =
-			this.#model?.input.includes("image") !== true &&
-			resolveSnapcompactVisionModel(this.#host.settings, this.#host.modelRegistry, this.#model) !== undefined;
+			resolveSnapcompactVisionSelection(this.#host.settings, this.#host.modelRegistry, this.#model) !== undefined;
 		const compactionAvailable =
 			payloadCompactionSettings.enabled &&
 			(this.#usesExperimentalContextManagement() ||
@@ -3900,7 +3899,7 @@ export class SessionMaintenance {
 		// it through the `snapcompact_recall` sidecar; the session keeps the
 		// active conversation model throughout.
 		const snapcompactAvailable =
-			resolveSnapcompactVisionModel(this.#host.settings, this.#host.modelRegistry, this.#model) !== undefined;
+			resolveSnapcompactVisionSelection(this.#host.settings, this.#host.modelRegistry, this.#model) !== undefined;
 		for (let index = startIndex; index < methods.length; index++) {
 			const candidate = methods[index];
 			if (
@@ -4263,11 +4262,11 @@ export class SessionMaintenance {
 			// sidecar; the session keeps the active conversation model throughout.
 			let snapcompactReader: Model | undefined;
 			if (action === "snapcompact" && compactionPrep.kind !== "fromHook") {
-				snapcompactReader = resolveSnapcompactVisionModel(
+				snapcompactReader = resolveSnapcompactVisionSelection(
 					this.#host.settings,
 					this.#host.modelRegistry,
 					this.#model,
-				);
+				)?.model;
 				if (!snapcompactReader) {
 					// No reader means the committed archive would be unreadable. Set
 					// the blocker before any serialize/shape work so the existing

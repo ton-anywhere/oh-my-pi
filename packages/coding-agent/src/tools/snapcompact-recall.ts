@@ -10,7 +10,8 @@ import * as snapcompact from "@oh-my-pi/snapcompact";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
 import { getLatestCompactionEntry } from "../session/session-context";
-import { resolveSnapcompactVisionModel } from "../session/role-models";
+import { resolveSnapcompactVisionSelection } from "../session/role-models";
+import { concreteThinkingLevel, shouldDisableReasoning, toReasoningEffort } from "../thinking";
 import type { ToolSession } from ".";
 import { ToolError } from "./tool-errors";
 import description from "../prompts/tools/snapcompact-recall.md" with { type: "text" };
@@ -53,8 +54,9 @@ export class SnapcompactRecallTool implements AgentTool<typeof schema> {
 		const archive = snapcompact.getPreservedArchive(compaction.preserveData);
 		if (!archive || archive.frames.length < 1)
 			throw new ToolError("No image-bearing snapcompact archive is available for recall.");
-		const model = resolveSnapcompactVisionModel(session.settings, modelRegistry, session.getActiveModel?.());
-		if (!model) throw new ToolError("No explicitly configured vision model is available for snapcompact recall.");
+		const selection = resolveSnapcompactVisionSelection(session.settings, modelRegistry, session.getActiveModel?.());
+		if (!selection) throw new ToolError("No explicitly configured vision model is available for snapcompact recall.");
+		const { model } = selection;
 		const context = manager.buildSessionContext({ includeSnapcompactFrames: true });
 		const summary = context.messages.find(
 			message => message.role === "compactionSummary" && message.summary === compaction.summary,
@@ -96,7 +98,8 @@ export class SnapcompactRecallTool implements AgentTool<typeof schema> {
 				{
 					apiKey: modelRegistry.resolver(model, expectedId ?? undefined),
 					signal,
-					reasoning: undefined,
+					reasoning: toReasoningEffort(concreteThinkingLevel(selection.thinkingLevel)),
+					disableReasoning: shouldDisableReasoning(concreteThinkingLevel(selection.thinkingLevel)),
 				},
 				{
 					telemetry: resolveTelemetry(session.getTelemetry?.(), expectedId ?? undefined),

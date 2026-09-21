@@ -1,6 +1,7 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../config/model-registry";
+import type { ConfiguredThinkingLevel } from "../thinking";
 import {
 	extractExplicitThinkingSelector,
 	formatModelSelectorValue,
@@ -85,14 +86,25 @@ export function resolveRoleModelFull(
 }
 
 /**
+ * Resolved vision model and its configured role thinking selector.
+ */
+export interface SnapcompactVisionSelection {
+	model: Model;
+	thinkingLevel?: ConfiguredThinkingLevel;
+}
+
+/**
  * Resolves the explicitly configured `modelRoles.vision` model for reading
  * snapcompact image frames. It never falls back to @default or availability.
  */
-export function resolveSnapcompactVisionModel(
+export function resolveSnapcompactVisionSelection(
 	settings: Settings,
 	modelRegistry: ModelRegistry,
 	activeModel: Model | undefined,
-): Model | undefined {
-	const model = resolveRoleModelFull(settings, "vision", modelRegistry.getAvailable(), activeModel).model;
-	return model?.input.includes("image") && modelRegistry.hasConfiguredAuth(model) ? model : undefined;
+): SnapcompactVisionSelection | undefined {
+	const resolved = resolveRoleModelFull(settings, "vision", modelRegistry.getAvailable(), activeModel);
+	const model = resolved.model;
+	return model?.input.includes("image") && modelRegistry.hasConfiguredAuth(model)
+		? { model, thinkingLevel: resolved.thinkingLevel }
+		: undefined;
 }

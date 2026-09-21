@@ -22,7 +22,7 @@ import { adjustHsv, formatNumber, getProjectDir, hexToRgb, rgbToHex } from "@oh-
 import { settings } from "../../../config/settings";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
-import { resolveSnapcompactVisionModel } from "../../../session/role-models";
+import { resolveSnapcompactVisionSelection } from "../../../session/role-models";
 import { limitMatchesActiveAccount } from "../../../slash-commands/helpers/active-oauth-account";
 import { type ActiveRepoContext, resolveActiveRepoContextSync } from "../../../utils/active-repo-context";
 import { withTimeoutSignal } from "../../../utils/fetch-timeout";
@@ -2896,7 +2896,7 @@ export class StatusLineComponent implements Component {
 			model !== null &&
 			model !== undefined &&
 			modelRegistry !== undefined &&
-			resolveSnapcompactVisionModel(source, modelRegistry, model) !== undefined;
+			resolveSnapcompactVisionSelection(source, modelRegistry, model) !== undefined;
 		try {
 			return computeCompactionBoundaries(source, contextWindow, model, snapcompactAvailable);
 		} catch {
