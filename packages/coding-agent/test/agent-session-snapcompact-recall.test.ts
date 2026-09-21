@@ -2,21 +2,30 @@
  * External contracts for the snapcompact vision-recall sidecar.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import * as ai from "@oh-my-pi/pi-ai";
-import type { AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Context, Message, Model } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { HIDDEN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import {
+	BUILTIN_TOOLS,
+	HIDDEN_TOOLS,
+	type Tool,
+	type ToolSession,
+	type XdevState,
+} from "@oh-my-pi/pi-coding-agent/tools";
 import { SnapcompactRecallTool } from "@oh-my-pi/pi-coding-agent/tools/snapcompact-recall";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 const UNIQUE_FACT = "EACCES: permission denied on /usr/local/bin/node";
 
@@ -38,6 +47,26 @@ function assistantMessage(text: string, model: Model): Message {
 		},
 		timestamp: Date.now(),
 	};
+}
+
+function sidecarAnswer(): AssistantMessage {
+	return {
+		role: "assistant",
+		api: "anthropic-messages",
+		provider: "aimlapi",
+		model: "claude-sonnet-4-5-20250929",
+		stopReason: "stop",
+		content: [{ type: "text", text: `The deploy failed with ${UNIQUE_FACT}.` }],
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		timestamp: Date.now(),
+	} as unknown as AssistantMessage;
 }
 
 function imageDataIn(messages: readonly unknown[]): string[] {
@@ -87,16 +116,19 @@ interface Harness {
 
 describe("AgentSession snapcompact vision recall", () => {
 	let session: AgentSession | undefined;
+	const replaySessions: AgentSession[] = [];
 	let authStorage: AuthStorage | undefined;
 	let tempDir: TempDir | undefined;
 
 	afterEach(async () => {
 		try {
 			await session?.dispose();
+			for (const replaySession of replaySessions.splice(0)) await replaySession.dispose();
 		} finally {
 			authStorage?.close();
 			await tempDir?.remove();
 			vi.restoreAllMocks();
+			ai.clearCustomApis();
 			session = undefined;
 			authStorage = undefined;
 			tempDir = undefined;
@@ -104,7 +136,12 @@ describe("AgentSession snapcompact vision recall", () => {
 	});
 
 	async function createHarness(
-		options: { visionRole?: string | null; seedMessages?: Message[]; failRecallTool?: boolean } = {},
+		options: {
+			visionRole?: string | null;
+			seedMessages?: Message[];
+			failRecallTool?: boolean;
+			xdevActive?: boolean;
+		} = {},
 	): Promise<Harness> {
 		const activeModel = getBundledModel("aimlapi", "alibaba/qwen3-coder-480b-a35b-instruct");
 		if (!activeModel) throw new Error("Expected bundled text-only model");
@@ -115,9 +152,6 @@ describe("AgentSession snapcompact vision recall", () => {
 		authStorage.setRuntimeApiKey("aimlapi", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 
-		const agent = new Agent({
-			initialState: { model: activeModel, systemPrompt: ["Test"], tools: [], messages: [] },
-		});
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		const seed = options.seedMessages ?? [
 			{ role: "user", content: `I ran the deploy script. ${"alpha ".repeat(60000)}`, timestamp: Date.now() },
@@ -146,6 +180,7 @@ describe("AgentSession snapcompact vision recall", () => {
 		const settings = Settings.isolated({
 			"compaction.methodOrder": ["snapcompact", "soft"],
 			"compaction.keepRecentTokens": 1,
+			...(options.xdevActive ? { "checkpoint.enabled": true } : {}),
 			...(options.visionRole === null
 				? {}
 				: { modelRoles: { vision: options.visionRole ?? "aimlapi/claude-sonnet-4-5-20250929" } }),
@@ -163,6 +198,40 @@ describe("AgentSession snapcompact vision recall", () => {
 			getSessionId: () => sessionRef.sessionId,
 			getTelemetry: () => undefined,
 		} as unknown as ToolSession;
+
+		// Optional xdev presentation layer: real built-in tools in the canonical
+		// registry so discoverable tools (checkpoint/rewind) mount under xd:// and
+		// only pinned tools stay top-level.
+		let agentTools: Tool[] = [];
+		let sessionExtras: {
+			toolRegistry?: Map<string, Tool>;
+			builtInToolNames?: string[];
+			xdev?: XdevState;
+		} = {};
+		if (options.xdevActive) {
+			const names = ["read", "write", "checkpoint", "rewind"] as const;
+			const toolRegistry = new Map<string, Tool>();
+			for (const name of names) {
+				const tool = await BUILTIN_TOOLS[name](toolSession);
+				if (!tool) throw new Error(`Expected built-in tool ${name}`);
+				toolRegistry.set(name, tool);
+			}
+			agentTools = [...toolRegistry.values()];
+			sessionExtras = {
+				toolRegistry,
+				builtInToolNames: [...names],
+				xdev: {
+					tools: toolRegistry,
+					mountedNames: new Set<string>(),
+					builtInNames: new Set(names),
+					isActive: () => false,
+				},
+			};
+		}
+
+		const agent = new Agent({
+			initialState: { model: activeModel, systemPrompt: ["Test"], tools: agentTools, messages: [] },
+		});
 		const sessionRef: AgentSession = new AgentSession({
 			agent,
 			sessionManager,
@@ -171,6 +240,7 @@ describe("AgentSession snapcompact vision recall", () => {
 			createSnapcompactRecallTool: options.failRecallTool
 				? async () => null
 				: async () => (await HIDDEN_TOOLS.snapcompact_recall(toolSession)) ?? null,
+			...sessionExtras,
 		});
 
 		return { session: sessionRef, sessionManager, activeModel, settings, modelRegistry, toolSession };
@@ -559,4 +629,146 @@ describe("AgentSession snapcompact vision recall", () => {
 			keylessAuth.close();
 		}
 	});
+
+	it("keeps snapcompact_recall top-level while xdev mounts other discoverable tools", async () => {
+		const harness = await createHarness({ xdevActive: true });
+		await harness.session.compact(undefined, { mode: "snapcompact" });
+
+		expect(activeToolNames(harness)).toContain("snapcompact_recall");
+		const mounted = harness.session.getMountedXdevToolNames();
+		// The pin only matters if xdev is actually mounting other discoverables.
+		expect(mounted).toContain("checkpoint");
+		expect(mounted).not.toContain("snapcompact_recall");
+	});
+
+	it("persists recall calls under the canonical name across events, history, and replay", async () => {
+		const harness = await createHarness();
+		await harness.session.compact(undefined, { mode: "snapcompact" });
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(sidecarAnswer());
+
+		const callId = "call-recall-canonical";
+		const api = "test-snapcompact-recall-turn";
+		let requests = 0;
+		const contexts: Context[] = [];
+		ai.registerCustomApi(api, (_model, context) => {
+			requests += 1;
+			contexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				if (requests === 1) {
+					const message = createAssistantMessage("");
+					const toolCall = {
+						type: "toolCall",
+						id: callId,
+						name: "snapcompact_recall",
+						arguments: { query: "What error did the deploy fail with?" },
+					} as const;
+					message.content = [toolCall];
+					message.stopReason = "toolUse";
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: toolCall as never, partial: message });
+					stream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					const message = createAssistantMessage("done");
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: "stop", message });
+				}
+			});
+			return stream;
+		});
+		harness.session.agent.setModel({ ...harness.activeModel, api: api as never });
+
+		const toolEvents: string[] = [];
+		harness.session.subscribe(event => {
+			if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
+				toolEvents.push(`${event.type}:${event.toolName}`);
+			}
+		});
+
+		await harness.session.sendUserMessage("what failed?");
+
+		expect(toolEvents).toEqual(["tool_execution_start:snapcompact_recall", "tool_execution_end:snapcompact_recall"]);
+
+		const branch = harness.sessionManager.getBranch();
+		const callEntry = branch.find(
+			entry =>
+				entry.type === "message" &&
+				entry.message.role === "assistant" &&
+				entry.message.content.some(block => block.type === "toolCall" && block.id === callId),
+		);
+		expect(callEntry).toBeDefined();
+		const resultEntry = branch.find(
+			entry =>
+				entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolCallId === callId,
+		);
+		if (!resultEntry || resultEntry.type !== "message" || resultEntry.message.role !== "toolResult") {
+			throw new Error("Expected a persisted recall tool result");
+		}
+		expect(resultEntry.message.toolName).toBe("snapcompact_recall");
+
+		const jsonlName = fs.readdirSync(tempDir!.path()).find(name => name.endsWith(".jsonl"));
+		if (!jsonlName) throw new Error("Expected a persisted session file");
+		const lines = fs.readFileSync(path.join(tempDir!.path(), jsonlName), "utf8").split("\n").filter(Boolean);
+		const callLines = lines.filter(line => line.includes(callId));
+		expect(callLines.length).toBeGreaterThan(0);
+		for (const line of callLines) {
+			expect(line).toContain("snapcompact_recall");
+			expect(line).not.toContain("xd://");
+		}
+
+		// Reopen the persisted session and verify the recall exchange replays as a
+		// paired canonical-name pair — never as a write envelope to an xd:// device.
+		const jsonlPath = path.join(tempDir!.path(), jsonlName);
+		const reopened = await SessionManager.open(jsonlPath, tempDir!.path(), undefined, {
+			initialCwd: tempDir!.path(),
+		});
+		let replaySessionRef: AgentSession;
+		const replayToolSession: ToolSession = {
+			cwd: tempDir!.path(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: harness.settings,
+			modelRegistry: harness.modelRegistry,
+			sessionManager: reopened,
+			getActiveModel: () => replaySessionRef.model,
+			getSessionId: () => replaySessionRef.sessionId,
+			getTelemetry: () => undefined,
+		} as unknown as ToolSession;
+		const replayAgent = new Agent({
+			initialState: { model: harness.activeModel, systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		const replaySession = new AgentSession({
+			agent: replayAgent,
+			sessionManager: reopened,
+			settings: harness.settings,
+			modelRegistry: harness.modelRegistry,
+			createSnapcompactRecallTool: async () => (await HIDDEN_TOOLS.snapcompact_recall(replayToolSession)) ?? null,
+		});
+		replaySessionRef = replaySession;
+		replaySessions.push(replaySession);
+		// Load the persisted conversation into the agent — the same seam switchSession
+		// uses when resuming (buildDisplaySessionContext + replaceMessages).
+		replaySession.agent.replaceMessages(replaySession.buildDisplaySessionContext().messages);
+		replaySession.agent.setModel({ ...harness.activeModel, api: api as never });
+
+		await replaySession.sendUserMessage("what failed?");
+
+		const replayContext = contexts.at(-1);
+		if (!replayContext) throw new Error("Expected a replay provider request");
+		const replayCall = replayContext.messages.find(
+			message =>
+				message.role === "assistant" &&
+				message.content.some(block => block.type === "toolCall" && block.id === callId),
+		);
+		expect(replayCall).toBeDefined();
+		const replayResult = replayContext.messages.find(
+			message => message.role === "toolResult" && message.toolCallId === callId,
+		);
+		if (!replayResult || replayResult.role !== "toolResult")
+			throw new Error("Expected a replayed recall tool result");
+		expect(replayResult.toolName).toBe("snapcompact_recall");
+		expect(allTextIn([replayResult])).toContain(UNIQUE_FACT);
+	}, 60_000);
 });
