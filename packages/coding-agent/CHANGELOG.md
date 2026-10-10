@@ -6,6 +6,7 @@
 
 - Added `tools.restrictedFolders`: every action on a listed folder (the folder and everything below it) asks for an explicit Approve/Deny in every approval mode, `yolo` included, and no remembered grant, session approval, or ACP "Always allow" covers it; recursive searches rooted above a restricted folder ask too, commands are matched by the directory they run in, and a `deny` policy still denies ([#16049](https://github.com/can1357/oh-my-pi/pull/16049) by [@Peribunt](https://github.com/Peribunt))
 - `/pause` shows draining turns and running jobs across the main agent's subagent tree, without waiting on finished turns, safely parked agents, or suspended advisor reviews ([#17073](https://github.com/can1357/oh-my-pi/pull/17073) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Added `skills.compressDescriptions` (default `true`) to disable background compression of skill descriptions: when off, skill descriptions are rendered as authored in the system prompt and no background compression model calls are made ([#13291](https://github.com/can1357/oh-my-pi/issues/13291)).
 
 ### Fixed
 
