@@ -80,6 +80,19 @@ export const cfgSkillsIncludeSkills = register({
 	default: EMPTY_STRING_ARRAY,
 });
 
+export const cfgSkillsCompressDescriptions = register({
+	id: "skills.compressDescriptions",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tasks",
+		group: "Commands & Skills",
+		label: "Compress Skill Descriptions",
+		description:
+			"Background-compress skill descriptions to a short routing hint; disable to keep descriptions as authored (no background model calls)",
+	},
+});
+
 /** Skill discovery options (`skills.*` except the `omp skill` registry URL). */
 export const cfgSkills = combine({
 	enabled: cfgSkillsEnabled,
@@ -94,6 +107,7 @@ export const cfgSkills = combine({
 	customDirectories: cfgSkillsCustomDirectories,
 	ignoredSkills: cfgSkillsIgnoredSkills,
 	includeSkills: cfgSkillsIncludeSkills,
+	compressDescriptions: cfgSkillsCompressDescriptions,
 });
 
 /** Skill discovery options ({@link cfgSkills}); omitted fields fall back to the setting defaults. */
