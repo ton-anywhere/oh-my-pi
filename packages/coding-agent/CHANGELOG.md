@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `skills.compressDescriptions` (default `true`) to disable background compression of skill descriptions: when off, skill descriptions are rendered as authored in the system prompt and no background compression model calls are made ([#13291](https://github.com/can1357/oh-my-pi/issues/13291)).
+
 ## [18.8.9] - 2026-10-10
 
 ### Added

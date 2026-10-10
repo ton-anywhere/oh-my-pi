@@ -259,16 +259,22 @@ export class SkillDescriptionStore {
 export class SkillDescriptionCatalog {
 	readonly #store: SkillDescriptionStore | undefined;
 	readonly #compress?: SkillDescriptionCompressor;
+	readonly #asAuthored: boolean;
 	readonly #snapshot = new Map<string, string>();
 
-	/** `store` defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep previews. */
-	constructor(options: { store?: SkillDescriptionStore; compress?: SkillDescriptionCompressor } = {}) {
+	/**
+	 * `store` defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep previews.
+	 * `asAuthored` renders descriptions exactly as written and never reads the store or schedules model work.
+	 */
+	constructor(options: { store?: SkillDescriptionStore; compress?: SkillDescriptionCompressor; asAuthored?: boolean } = {}) {
 		this.#store = options.store ?? sharedSkillDescriptionStore();
 		this.#compress = options.compress;
+		this.#asAuthored = options.asAuthored === true;
 	}
 
 	/** Read the session's frozen prompt hints without starting new model work. */
 	snapshot(skills: readonly Skill[]): Array<Skill & { description: string }> {
+		if (this.#asAuthored) return [...skills];
 		return skills.map(skill => ({
 			...skill,
 			description: this.#snapshot.get(keyFor(skill)) ?? previewSkillDescription(skill.description),
@@ -276,7 +282,7 @@ export class SkillDescriptionCatalog {
 	}
 
 	render(skills: readonly Skill[]): Array<Skill & { description: string }> {
-		if (skills.length === 0) return [];
+		if (this.#asAuthored) return [...skills];
 		const store = this.#store;
 		return skills.map(skill => {
 			const key = keyFor(skill);

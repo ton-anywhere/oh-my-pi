@@ -355,6 +355,7 @@ import {
 	cfgDisabledExtensions,
 	cfgExtensions,
 	cfgSkills,
+	cfgSkillsCompressDescriptions,
 	type SkillsSettings,
 } from "./extensibility/settings";
 import { cfgTtsr } from "./export/ttsr-settings";
@@ -3728,18 +3729,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			path.resolve(agentDir) === path.resolve(getAgentDir())
 				? undefined
 				: openSessionSkillDescriptionStore(agentDir);
-		const skillDescriptions = new SkillDescriptionCatalog({
-			store: ownedSkillDescriptionStore,
-			// Like the other one-shot model calls, each compression request resolves
-			// its own telemetry handle, so its usage stays out of the run summary.
-			// The first requests can start before `agent` is constructed; they use
-			// the telemetry config and session id the agent is constructed with.
-			compress: createSkillDescriptionCompressor(modelRegistry, settings, undefined, () =>
-				agent
-					? resolveTelemetry(agent.telemetry, agent.sessionId)
-					: resolveTelemetry(options.telemetry, providerSessionId),
-			),
-		});
+		const skillDescriptions = new SkillDescriptionCatalog(
+			cfgSkillsCompressDescriptions.get(settings)
+				? {
+						store: ownedSkillDescriptionStore,
+						// Like the other one-shot model calls, each compression request resolves
+						// its own telemetry handle, so its usage stays out of the run summary.
+						// The first requests can start before `agent` is constructed; they use
+						// the telemetry config and session id the agent is constructed with.
+						compress: createSkillDescriptionCompressor(modelRegistry, settings, undefined, () =>
+							agent
+								? resolveTelemetry(agent.telemetry, agent.sessionId)
+								: resolveTelemetry(options.telemetry, providerSessionId),
+						),
+					}
+				: { asAuthored: true },
+		);
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
