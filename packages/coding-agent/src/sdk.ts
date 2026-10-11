@@ -3725,12 +3725,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let advisorMemoryPrompt: string | undefined;
 		// The process agent dir uses the process-wide store; a session rooted in
 		// another agent dir keeps its own, closed when the session is disposed.
+		// As-authored sessions read no store, so an opt-out session opens no database.
+		const skillsCompressed = cfgSkillsCompressDescriptions.get(settings);
 		const ownedSkillDescriptionStore =
-			path.resolve(agentDir) === path.resolve(getAgentDir())
+			!skillsCompressed || path.resolve(agentDir) === path.resolve(getAgentDir())
 				? undefined
 				: openSessionSkillDescriptionStore(agentDir);
 		const skillDescriptions = new SkillDescriptionCatalog(
-			cfgSkillsCompressDescriptions.get(settings)
+			skillsCompressed
 				? {
 						store: ownedSkillDescriptionStore,
 						// Like the other one-shot model calls, each compression request resolves

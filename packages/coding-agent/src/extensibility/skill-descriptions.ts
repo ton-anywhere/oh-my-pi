@@ -264,12 +264,15 @@ export class SkillDescriptionCatalog {
 
 	/**
 	 * `store` defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep previews.
-	 * `asAuthored` renders descriptions exactly as written and never reads the store or schedules model work.
+	 * `asAuthored` renders descriptions exactly as written, opens no default store, and never schedules model work.
 	 */
-	constructor(options: { store?: SkillDescriptionStore; compress?: SkillDescriptionCompressor; asAuthored?: boolean } = {}) {
-		this.#store = options.store ?? sharedSkillDescriptionStore();
+	constructor(
+		options: { store?: SkillDescriptionStore; compress?: SkillDescriptionCompressor; asAuthored?: boolean } = {},
+	) {
 		this.#compress = options.compress;
 		this.#asAuthored = options.asAuthored === true;
+		// As-authored sessions read no store, so don't open the shared database for them.
+		this.#store = this.#asAuthored ? undefined : (options.store ?? sharedSkillDescriptionStore());
 	}
 
 	/** Read the session's frozen prompt hints without starting new model work. */
