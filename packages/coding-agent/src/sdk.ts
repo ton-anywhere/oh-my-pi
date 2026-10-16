@@ -82,6 +82,7 @@ import {
 	resolveSessionModelSelector,
 	sessionModelDiscoveryProviders,
 } from "./config/model-resolver";
+import { buildPresetOverlay } from "./config/model-presets";
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { buildServiceTierByFamily } from "./config/service-tier";
@@ -1988,6 +1989,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const hasThinkingEntry = existingBranch.some(entry => entry.type === "thinking_level_change");
 	const hasServiceTierEntry = existingBranch.some(entry => entry.type === "service_tier_change");
 
+	// Session model preset: role resolution uses the 3-tier precedence
+	// (per-role override → active preset role → base `modelRoles`) via a live
+	// overlay child. Passes the base through when no preset is active.
+	const sessionSettings = buildPresetOverlay(settings, existingSession.activePreset, existingSession.models);
+
 	const deferredModelPatterns = Array.isArray(options.modelPattern)
 		? options.modelPattern.map(pattern => pattern.trim()).filter(Boolean)
 		: options.modelPattern?.trim()
@@ -1995,7 +2001,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			: [];
 	const hasExplicitModel = options.model !== undefined || deferredModelPatterns.length > 0;
 	const modelMatchPreferences = getModelMatchPreferences(settings);
-	const defaultRoleValue = settings.getModelRole("default");
+	const defaultRoleValue = sessionSettings.getModelRole("default");
 	let explicitDefaultProviders: Set<string> | undefined;
 	if ((cfgEnabledModels.get(settings)?.length ?? 0) === 0) {
 		const patterns = resolveConfiguredModelPatterns(defaultRoleValue, settings);
@@ -2024,7 +2030,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	);
 	let defaultRoleSpec = logger.time("resolveDefaultModelRole", () =>
 		resolveModelRoleValue(defaultRoleValue, allowedModels, {
-			settings,
+			settings: sessionSettings,
 			matchPreferences: modelMatchPreferences,
 		}),
 	);
@@ -4692,7 +4698,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
-			settings,
+			settings: sessionSettings,
 			additionalExtensionPaths: options.additionalExtensionPaths,
 			extensionRoots: buildSessionExtensionRoots,
 			preparedExtensions: extensionsResult.preparedExtensions,

@@ -64,6 +64,33 @@ export function getModelPreset(settings: Settings, name: string): PresetLookup {
 	return typeof parsed === "string" ? { kind: "invalid", reason: parsed } : { kind: "found", preset: parsed };
 }
 
+/**
+ * Session `Settings` overlay for the active preset: role resolution uses the
+ * 3-tier precedence per-role override (`roleOverrides`) → active preset role →
+ * base `modelRoles`, and `defaultThinkingLevel` comes from the preset when it
+ * records one. Passes the base through (no behavior change) when `activePreset`
+ * is `undefined` or its lookup is not `found`.
+ *
+ * The child's `modelRoles` deep-merges per-key over the parent, so a role absent
+ * from both the preset and the overrides falls through to its base value.
+ */
+export function buildPresetOverlay(
+	base: Settings,
+	activePreset: string | undefined,
+	roleOverrides: Record<string, string>,
+): Settings {
+	if (!activePreset) return base.overlay({});
+	const lookup = getModelPreset(base, activePreset);
+	if (lookup.kind !== "found") return base.overlay({});
+	const overrides: Record<string, unknown> = {
+		modelRoles: { ...lookup.preset.modelRoles, ...roleOverrides },
+	};
+	if (lookup.preset.defaultThinkingLevel !== undefined) {
+		overrides.defaultThinkingLevel = lookup.preset.defaultThinkingLevel;
+	}
+	return base.overlay(overrides);
+}
+
 /** Saved preset names, sorted; names a `--config`/runtime `null` tombstone hides are left out. */
 export function getModelPresetNames(settings: Settings): string[] {
 	return Object.keys(cfgModelPresets.get(settings))
