@@ -112,6 +112,8 @@ export interface SessionContext {
 	serviceTier?: ServiceTierByFamily;
 	/** Model roles: { default: "provider/modelId", small: "provider/modelId", ... } */
 	models: Record<string, string>;
+	/** Active model preset from the latest change on the active branch. */
+	activePreset?: string;
 	/** Names of TTSR rules that have been injected this session */
 	injectedTtsrRules: string[];
 	/** Active mode (e.g. "plan") or "none" if no special mode is active */
@@ -253,6 +255,7 @@ export function buildSessionContext(
 			thinkingLevel: "off",
 			serviceTier: undefined,
 			models: {},
+			activePreset: undefined,
 			injectedTtsrRules: [],
 			mode: "none",
 		};
@@ -271,6 +274,7 @@ export function buildSessionContext(
 			thinkingLevel: "off",
 			serviceTier: undefined,
 			models: {},
+			activePreset: undefined,
 			injectedTtsrRules: [],
 			mode: "none",
 		};
@@ -293,6 +297,7 @@ export function buildSessionContext(
 	let configuredThinkingLevel: string | undefined;
 	let serviceTier: ServiceTierByFamily | undefined;
 	const models: Record<string, string> = {};
+	let activePreset: string | undefined;
 	let compaction: CompactionEntry | null = null;
 	const injectedTtsrRulesSet = new Set<string>();
 	let mode = "none";
@@ -319,6 +324,8 @@ export function buildSessionContext(
 					hasExplicitDefaultModel = true;
 				}
 			}
+		} else if (entry.type === "preset_change") {
+			activePreset = entry.preset;
 		} else if (entry.type === "service_tier_change") {
 			serviceTier = coerceServiceTierByFamily(entry.serviceTier);
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
@@ -773,6 +780,7 @@ export function buildSessionContext(
 		configuredThinkingLevel,
 		serviceTier,
 		models,
+		activePreset,
 		injectedTtsrRules,
 		mode,
 		modeData,
