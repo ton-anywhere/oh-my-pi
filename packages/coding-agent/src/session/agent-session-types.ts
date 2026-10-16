@@ -158,6 +158,12 @@ export interface AgentSessionConfig {
 	codeModeState?: { namespacesInfo?: unknown };
 	sessionManager: SessionManager;
 	settings: Settings;
+	/**
+	 * The pure (non-overlay) base settings the active preset's overlay is rebuilt from.
+	 * Defaults to {@link settings}; the SDK passes the pre-overlay base so a deleted
+	 * preset falls back to the true base default, not a stale overlay.
+	 */
+	baseSettings?: Settings;
 	/** Model preset this session starts on: replayed from `preset_change` entries or seeded by the `--preset` startup flag. */
 	activePreset?: string;
 	/**
