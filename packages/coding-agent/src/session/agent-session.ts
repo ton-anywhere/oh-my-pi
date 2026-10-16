@@ -130,7 +130,7 @@ import {
 	resolveSessionModelSelector,
 	sessionModelDiscoveryProviders,
 } from "../config/model-resolver";
-import { buildPresetOverlay, getModelPreset, roleOverridesAboveBase } from "../config/model-presets";
+import { getModelPreset } from "../config/model-presets";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
 import { combine, type SettingsScope } from "../config/registry";
@@ -837,20 +837,21 @@ function todoRetryMatches(failed: Record<string, unknown>, retry: Record<string,
 export class AgentSession implements SettingsScope {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
-	#settings: Settings;
-	/** The base (non-overlay) settings; the active preset's overlay is rebuilt on top of it. */
-	readonly #baseSettings: Settings;
+	/** The durable base settings: the shared config this session writes through. */
+	readonly settings: Settings;
 	/** The preset this session is on, from its latest `preset_change`; `undefined` for a bare session. */
 	#activePreset: string | undefined;
+	/** Explicit user role selectors for this session (tier 1 of the role precedence). */
+	#sessionRoleOverrides: Record<string, string> = {};
 	/** Armed after the active preset's def degrades (missing/invalid/unavailable); cleared when it recovers. */
 	#presetReResolveWarned = false;
-	/** The session's effective settings: the base overlaid with the active preset's roles. */
-	get settings(): Settings {
-		return this.#settings;
-	}
 	/** The preset this session is on, or `undefined` for a bare session. */
 	get activePreset(): string | undefined {
 		return this.#activePreset;
+	}
+	/** Explicit user role selectors (tier 1); journal-persisted so they survive resume. */
+	get sessionRoleOverrides(): Readonly<Record<string, string>> {
+		return this.#sessionRoleOverrides;
 	}
 	/** Session-start policy, independent of the selected project memory backend. */
 	readonly memoryEnabled: boolean;
@@ -1764,9 +1765,9 @@ export class AgentSession implements SettingsScope {
 				isHiddenUserCompanion(previous) && (isHiddenUserCompanion(next) || isUserQueuedMessage(next)),
 		);
 		this.sessionManager = config.sessionManager;
-		this.#settings = config.settings;
-		this.#baseSettings = config.baseSettings ?? config.settings;
+		this.settings = config.settings;
 		this.#activePreset = config.activePreset;
+		this.#sessionRoleOverrides = { ...config.sessionRoleOverrides };
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
@@ -1901,14 +1902,11 @@ export class AgentSession implements SettingsScope {
 		});
 		this.#ownedAsyncJobManager = config.ownedAsyncJobManager;
 		this.#asyncJobManager = config.asyncJobManager ?? config.ownedAsyncJobManager;
-		const self = this;
 		const modelControlsHost: ModelControlsHost = {
 			agent: this.agent,
-			// Live: role resolution (e.g. the default model at the next model call) must see the
-			// overlay a live preset-def edit or `setActivePreset` just rebuilt, not the captured one.
-			get settings() {
-				return self.#settings;
-			},
+			settings: this.settings,
+			effectiveModelRole: role => this.effectiveModelRole(role),
+			setSessionRoleOverride: (role, selector) => this.setSessionRoleOverride(role, selector),
 			modelRegistry: this.#modelRegistry,
 			sessionManager: this.sessionManager,
 			providerSessionState: this.#providerSessionState,
@@ -1957,6 +1955,7 @@ export class AgentSession implements SettingsScope {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
 			settings: this.settings,
+			effectiveModelRole: role => this.effectiveModelRole(role),
 			modelRegistry: this.#modelRegistry,
 			configWarnings: this.configWarnings,
 			model: () => this.model,
@@ -2447,6 +2446,7 @@ export class AgentSession implements SettingsScope {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
 			settings: this.settings,
+			effectiveModelRole: role => this.effectiveModelRole(role),
 			modelRegistry: this.#modelRegistry,
 			extensionRunner: this.#extensionRunner,
 			sideStreamFn: this.#sideStreamFn,
@@ -10226,6 +10226,8 @@ export class AgentSession implements SettingsScope {
 			this.setTodoPhases([]);
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
+			// A fresh session starts with no active preset and no explicit role overrides.
+			this.#restorePresetState(this.buildDisplaySessionContext());
 			this.#syncAgentSessionId();
 			await this.#prewalk.resetForNewSession(this.#agentKind === "main" && cfgPrewalkEnabled.get(this.settings));
 			// Re-apply the configured selector so the new session does not inherit
@@ -10486,58 +10488,118 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Record `preset` as this session's active preset and rebuild the session's
-	 * settings overlay on top of the base. Called only after the live model
-	 * switch succeeds, so a failed switch retains the prior preset (a failed
-	 * switch is never a completed one). The shared config is never written.
+	 * Make `preset` this session's active preset: switch the live model and
+	 * thinking level to the (already-validated) target, then record the preset.
+	 * The journal entry lands only after the live switch succeeds, so a failed
+	 * switch retains the prior preset and model (a failed switch is never a
+	 * completed one). The shared config is never written.
 	 */
-	async setActivePreset(preset: string): Promise<void> {
-		this.sessionManager.appendPresetChange(preset);
+	async setActivePreset(
+		preset: string,
+		model: Model,
+		thinkingLevel: ConfiguredThinkingLevel | undefined,
+	): Promise<void> {
+		await this.#setModelWithProviderSessionReset(model);
+		// `:inherit` means "no explicit level": leave what the model switch applied.
+		if (thinkingLevel !== undefined && thinkingLevel !== "inherit") {
+			this.setThinkingLevel(thinkingLevel);
+		}
 		this.#activePreset = preset;
-		this.#settings = buildPresetOverlay(this.#baseSettings, preset, roleOverridesAboveBase(this.#baseSettings));
+		this.#presetReResolveWarned = false;
+		this.sessionManager.appendPresetChange(preset);
 	}
 
 	/**
-	 * Re-resolve the active preset's live default when its definition is edited or
-	 * deleted. The overlay is rebuilt so the new default takes effect at the next model
-	 * call — an in-flight turn is never swapped. A missing/invalid def falls back to the
-	 * base default and keeps the recorded name (so re-creating the def restores the
-	 * preset); an unavailable default keeps the current model. Each degrades on a single
-	 * warning per condition change, cleared when the def recovers.
+	 * The session's effective selector for `role`: explicit session override →
+	 * active preset role → base settings. Computed on the fly so definition
+	 * edits are picked up without reassigning any settings object.
+	 */
+	effectiveModelRole(role: string): string | undefined {
+		const override = this.#sessionRoleOverrides[role];
+		if (override !== undefined) return override;
+		if (this.#activePreset) {
+			const preset = getModelPreset(this.settings, this.#activePreset);
+			if (preset.kind === "found") {
+				const presetRole = preset.preset.modelRoles[role];
+				if (presetRole !== undefined) return presetRole;
+			}
+		}
+		return this.settings.getModelRole(role);
+	}
+
+	/** The effective default thinking level: the active preset's, when it records one, else the base's. */
+	effectiveDefaultThinkingLevel(): ConfiguredThinkingLevel | undefined {
+		if (this.#activePreset) {
+			const preset = getModelPreset(this.settings, this.#activePreset);
+			if (preset.kind === "found" && preset.preset.defaultThinkingLevel !== undefined) {
+				return preset.preset.defaultThinkingLevel;
+			}
+		}
+		return parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings));
+	}
+
+	/** Record an explicit user role selector (tier 1) and journal it. */
+	setSessionRoleOverride(role: string, selector: string): void {
+		this.#sessionRoleOverrides[role] = selector;
+		this.sessionManager.appendModelChange(selector, role, false, true);
+	}
+
+	/**
+	 * Restores the per-session preset state from a target context: the active
+	 * preset (from its latest `preset_change`) and the explicit user role
+	 * selectors (from its `model_change` entries). A fresh context clears both.
+	 */
+	#restorePresetState(context: SessionContext): void {
+		this.#activePreset = context.activePreset;
+		this.#sessionRoleOverrides = { ...context.explicitRoleOverrides };
+		this.#presetReResolveWarned = false;
+	}
+
+	/**
+	 * Re-resolve the active preset's live default when its definition is edited
+	 * or deleted — an in-flight turn is never swapped. A missing/invalid def
+	 * falls back to the base default and keeps the recorded name (so
+	 * re-creating the def restores the preset); an unavailable default keeps the
+	 * current model. Each degrades on a single warning per condition change,
+	 * cleared when the def recovers.
 	 */
 	#reconcileActivePresetLive(): void {
 		if (this.#isDisposed) return;
 		const preset = this.#activePreset;
 		if (!preset) return;
-		const overlay = buildPresetOverlay(this.#baseSettings, preset, roleOverridesAboveBase(this.#baseSettings));
-		if (getModelPreset(this.#baseSettings, preset).kind !== "found") {
-			// Definition deleted (or invalid): fall back to the base default, keep the name.
-			this.#settings = overlay;
-			if (this.#presetReResolveWarned) return;
-			this.#presetReResolveWarned = true;
-			this.emitNotice(
-				"warning",
-				`Model preset "${preset}" is unavailable; using the base default model.`,
-				"model-preset",
-			);
-			return;
-		}
-		// Definition present: apply its default only when it resolves to an available, authed model.
-		const roleValue = overlay.getModelRole("default");
+		const lookup = getModelPreset(this.settings, preset);
+		const roleValue = this.effectiveModelRole("default");
 		const resolved = roleValue
-			? resolveModelRoleValue(roleValue, this.#modelRegistry.getAvailable(), { settings: overlay })
+			? resolveModelRoleValue(roleValue, this.#modelRegistry.getAvailable(), { settings: this.settings })
 			: undefined;
-		if (resolved?.model && this.#modelRegistry.hasConfiguredAuth(resolved.model)) {
-			this.#settings = overlay;
-			this.#presetReResolveWarned = false;
+		const target =
+			resolved?.model && this.#modelRegistry.hasConfiguredAuth(resolved.model) ? resolved.model : undefined;
+		if (target) {
+			if (lookup.kind !== "found") {
+				// Definition deleted (or invalid): the base default is in effect; keep the name.
+				if (!this.#presetReResolveWarned) {
+					this.#presetReResolveWarned = true;
+					this.emitNotice(
+						"warning",
+						`Model preset "${preset}" is unavailable; using the base default model.`,
+						"model-preset",
+					);
+				}
+			} else {
+				this.#presetReResolveWarned = false;
+			}
+			if (this.model && modelsAreEqual(this.model, target)) return;
+			void this.#setModelWithProviderSessionReset(target);
 			return;
 		}
-		// New default unavailable: keep the current model; warn once per condition change.
+		// Effective default unavailable: keep the current model; warn once per condition change.
 		if (this.#presetReResolveWarned) return;
 		this.#presetReResolveWarned = true;
 		this.emitNotice(
 			"warning",
-			`Model preset "${preset}"'s default model is unavailable; keeping the current model.`,
+			lookup.kind === "found"
+				? `Model preset "${preset}"'s default model is unavailable; keeping the current model.`
+				: `Model preset "${preset}" is unavailable; keeping the current model.`,
 			"model-preset",
 		);
 	}
@@ -11906,6 +11968,9 @@ export class AgentSession implements SettingsScope {
 		const previousBaseSystemPromptBeforeMemoryPromotion = this.#memory.promotionSnapshot;
 		const previousFreshProviderSessionId = this.#freshProviderSessionId;
 		const previousInheritedProviderPromptCacheKey = this.#inheritedProviderPromptCacheKey;
+		const previousActivePreset = this.#activePreset;
+		const previousSessionRoleOverrides = { ...this.#sessionRoleOverrides };
+		const previousPresetReResolveWarned = this.#presetReResolveWarned;
 
 		// Snapshot the full checkpoint runtime state: the success path calls
 		// #rehydrateCheckpointRewindState(), which clears and rebuilds all four
@@ -11974,12 +12039,24 @@ export class AgentSession implements SettingsScope {
 			this.#memory.rekeyForCurrentSessionId();
 
 			let sessionContext = this.buildDisplaySessionContext();
+			// Restore the target's per-session preset state before resolving its model,
+			// so a preset session re-resolves its default from the current definition
+			// instead of a frozen receipt.
+			this.#restorePresetState(sessionContext);
 			// Resolve the target's model before announcing the switch, so an
 			// unrestorable one rolls back before any hook sees the target session.
-			const targetModelStrings = getRestorableSessionModels(
+			let targetModelStrings = getRestorableSessionModels(
 				sessionContext.models,
 				this.sessionManager.getLastModelChangeRole(),
 			);
+			if (this.#activePreset) {
+				// The preset's current definition decides the default model first; the
+				// journal receipts are the fallback when the def no longer resolves.
+				const presetDefault = this.effectiveModelRole("default");
+				if (presetDefault) {
+					targetModelStrings = [presetDefault, ...targetModelStrings.filter(s => s !== presetDefault)];
+				}
+			}
 			let targetModel = explicitModel;
 			let modelFallbackWarning: string | undefined;
 			if (!targetModel && !options?.keepModel && targetModelStrings.length > 0) {
@@ -12168,6 +12245,9 @@ export class AgentSession implements SettingsScope {
 			this.#pendingRewindReport = previousPendingRewindReport;
 			this.#lastCompletedRewind = previousLastCompletedRewind;
 			this.#rewoundToolResultIds = previousRewoundToolResultIds;
+			this.#activePreset = previousActivePreset;
+			this.#sessionRoleOverrides = previousSessionRoleOverrides;
+			this.#presetReResolveWarned = previousPresetReResolveWarned;
 			// The try block may have already reached #setModelWithProviderSessionReset
 			// for the target session's model, which emits `model_changed` for it.
 			// Restoring here bypasses that method (it also resets provider-session
@@ -12369,6 +12449,7 @@ export class AgentSession implements SettingsScope {
 
 			// Reload messages from entries (works for both file and in-memory mode)
 			const sessionContext = this.buildDisplaySessionContext();
+			this.#restorePresetState(sessionContext);
 
 			// Emit session_branch event to hooks (after branch completes)
 			if (this.#extensionRunner) {
@@ -12490,6 +12571,7 @@ export class AgentSession implements SettingsScope {
 			await this.#memory.resetContextForNewTranscript();
 
 			const sessionContext = this.buildDisplaySessionContext();
+			this.#restorePresetState(sessionContext);
 
 			if (this.#extensionRunner) {
 				await this.#extensionRunner.emit({
@@ -12825,6 +12907,9 @@ export class AgentSession implements SettingsScope {
 			maxFrameDataBytes: frameDataBytesBudget(this.model),
 		});
 		const displayContext = this.#withEvalStateContext(deobfuscateSessionContext(stateContext, this.#obfuscator));
+		// The target branch's own preset state: navigating within a session can
+		// cross branches that recorded different presets or overrides.
+		this.#restorePresetState(stateContext);
 		this.agent.replaceMessages(displayContext.messages);
 		this.#rehydrateCheckpointRewindState();
 		this.#advisors.resetSessionState({ preserveCost: true });

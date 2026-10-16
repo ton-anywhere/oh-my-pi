@@ -1,7 +1,8 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
-import type { ModelRegistry } from "../config/model-registry";
+import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import type { ModelRegistry } from "../config/model-registry";
 import {
 	extractExplicitThinkingSelector,
 	getModelMatchPreferences,
@@ -72,17 +73,20 @@ export function resolveRoleModelFull(
 	role: string,
 	availableModels: Model[],
 	currentModel: Model | undefined,
+	roleLookup?: ModelRoleLookup,
 ): ResolvedModelRoleValue {
 	const roleModelStr =
 		role === "default"
-			? (settings.getModelRole("default") ??
+			? (roleLookup?.getModelRole("default") ??
+				settings.getModelRole("default") ??
 				(currentModel ? `${currentModel.provider}/${currentModel.id}` : undefined))
-			: settings.getModelRole(role);
+			: (roleLookup?.getModelRole(role) ?? settings.getModelRole(role));
 	if (!roleModelStr) {
 		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
 	}
 	return resolveModelRoleValue(roleModelStr, availableModels, {
 		settings,
 		matchPreferences: getModelMatchPreferences(settings),
+		roleLookup,
 	});
 }

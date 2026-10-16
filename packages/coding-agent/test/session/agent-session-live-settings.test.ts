@@ -52,7 +52,7 @@ describe("AgentSession live settings", () => {
 
 	const start = async (
 		settings: Settings,
-		extra?: Pick<CreateAgentSessionOptions, "systemPrompt" | "preset">,
+		extra?: Pick<CreateAgentSessionOptions, "systemPrompt" | "preset" | "model" | "sessionManager">,
 	): Promise<AgentSession> => {
 		const cwd = path.join(os.tmpdir(), `pi-live-settings-${Snowflake.next()}`);
 		tempDirs.push(cwd);

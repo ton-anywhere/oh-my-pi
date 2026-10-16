@@ -297,8 +297,11 @@ export function buildModelSelectorCompletions(
 			}
 		} else {
 			rankModels ??= createModelMentionSource({
-				source: createModelBrowserSource(runtime.ctx.settings, model =>
-					runtime.ctx.session.effectiveServiceTier(model),
+				source: createModelBrowserSource(
+					runtime.ctx.settings,
+					model => runtime.ctx.session.effectiveServiceTier(model),
+					() => runtime.ctx.session.activePreset,
+					role => runtime.ctx.session.effectiveModelRole(role),
 				),
 				registry: runtime.ctx.session.modelRegistry,
 				scopedModels: () => runtime.ctx.session.scopedModels.map(entry => entry.model),

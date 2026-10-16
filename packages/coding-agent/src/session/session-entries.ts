@@ -126,6 +126,8 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	model: string;
 	/** Role: "default", "smol", "slow", etc. Undefined treated as "default" */
 	role?: string;
+	/** True when the user explicitly selected this role's model (vs. an automatic receipt). */
+	explicit?: boolean;
 	/** True when this transition selected a retry-fallback model rather than the configured model. */
 	resolvedModelIsFallback?: boolean;
 }

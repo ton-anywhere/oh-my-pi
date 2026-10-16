@@ -3508,14 +3508,16 @@ export class SessionManager {
 	 * @param model Model in "provider/modelId" format
 	 * @param role Optional role (default: "default")
 	 * @param resolvedModelIsFallback Whether this transition selected a retry-fallback model
+	 * @param explicit Whether the user explicitly selected this role's model (vs. an automatic receipt)
 	 */
-	appendModelChange(model: string, role?: string, resolvedModelIsFallback = false): string {
+	appendModelChange(model: string, role?: string, resolvedModelIsFallback = false, explicit = false): string {
 		const entry: ModelChangeEntry = {
 			type: "model_change",
 			...this.#freshEntryFields(),
 			model,
 			role,
 			resolvedModelIsFallback,
+			...(explicit ? { explicit: true } : {}),
 		};
 		this.#recordEntry(entry);
 		return entry.id;

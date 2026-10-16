@@ -114,6 +114,8 @@ export interface SessionContext {
 	serviceTier?: ServiceTierByFamily;
 	/** Model roles: { default: "provider/modelId", small: "provider/modelId", ... } */
 	models: Record<string, string>;
+	/** Explicit user role selectors from `model_change` entries (last wins per role); automatic receipts are excluded. */
+	explicitRoleOverrides: Record<string, string>;
 	/** Active model preset from the latest change on the active branch. */
 	activePreset?: string;
 	/** Names of TTSR rules that have been injected this session */
@@ -260,6 +262,7 @@ export function buildSessionContext(
 			thinkingLevel: "off",
 			serviceTier: undefined,
 			models: {},
+			explicitRoleOverrides: {},
 			activePreset: undefined,
 			injectedTtsrRules: [],
 			mode: "none",
@@ -277,6 +280,7 @@ export function buildSessionContext(
 			thinkingLevel: "off",
 			serviceTier: undefined,
 			models: {},
+			explicitRoleOverrides: {},
 			activePreset: undefined,
 			injectedTtsrRules: [],
 			mode: "none",
@@ -300,6 +304,10 @@ export function buildSessionContext(
 	let configuredThinkingLevel: string | undefined;
 	let serviceTier: ServiceTierByFamily | undefined;
 	const models: Record<string, string> = {};
+	// Explicit user role selections only: automatic receipts (initial model,
+	// preset switches) stay in `models` for restore fallbacks but must not pin
+	// preset-backed roles on resume.
+	const explicitRoleOverrides: Record<string, string> = {};
 	let activePreset: string | undefined;
 	let compaction: CompactionEntry | null = null;
 	const injectedTtsrRulesSet = new Set<string>();
@@ -323,6 +331,9 @@ export function buildSessionContext(
 			if (entry.model) {
 				const role = entry.role ?? "default";
 				models[role] = entry.model;
+				if (entry.explicit) {
+					explicitRoleOverrides[role] = entry.model;
+				}
 				if (role === "default") {
 					hasExplicitDefaultModel = true;
 				}
@@ -778,6 +789,7 @@ export function buildSessionContext(
 		configuredThinkingLevel,
 		serviceTier,
 		models,
+		explicitRoleOverrides,
 		activePreset,
 		injectedTtsrRules,
 		mode,

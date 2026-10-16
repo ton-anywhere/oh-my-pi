@@ -531,6 +531,7 @@ export class SelectorController {
 					this.ctx.settings,
 					model => this.ctx.session.effectiveServiceTier(model),
 					() => this.ctx.session.activePreset,
+					role => this.ctx.session.effectiveModelRole(role),
 				),
 				defaultToolNames: ADVISOR_DEFAULT_TOOL_NAMES,
 				externalEditor: text => {
@@ -846,7 +847,12 @@ export class SelectorController {
 		const isCurrent = () => this.#openMenus.get(menuKind) === menu;
 		const picker = new ModelPickerComponent(
 			this.ctx.ui,
-			createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
+			createModelBrowserSource(
+				this.ctx.settings,
+				model => this.ctx.session.effectiveServiceTier(model),
+				() => this.ctx.session.activePreset,
+				role => this.ctx.session.effectiveModelRole(role),
+			),
 			this.ctx.session.modelRegistry,
 			this.ctx.session.scopedModels,
 			{
@@ -950,6 +956,7 @@ export class SelectorController {
 				this.ctx.settings,
 				model => this.ctx.session.effectiveServiceTier(model),
 				() => this.ctx.session.activePreset,
+				role => this.ctx.session.effectiveModelRole(role),
 			),
 			this.ctx.session.modelRegistry,
 			this.ctx.session.scopedModels,
