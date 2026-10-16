@@ -31,6 +31,8 @@ export interface Args {
 	allowHome?: boolean;
 	provider?: string;
 	model?: string;
+	/** Model preset name to start on; validated against saved presets at startup. */
+	preset?: string;
 	config?: string[];
 	smol?: string;
 	slow?: string;

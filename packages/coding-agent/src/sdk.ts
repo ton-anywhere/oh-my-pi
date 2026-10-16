@@ -82,7 +82,8 @@ import {
 	resolveSessionModelSelector,
 	sessionModelDiscoveryProviders,
 } from "./config/model-resolver";
-import { buildPresetOverlay } from "./config/model-presets";
+import { buildPresetOverlay, getModelPreset, getModelPresetNames } from "./config/model-presets";
+import { CliUsageError } from "./cli/usage-error";
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { buildServiceTierByFamily } from "./config/service-tier";
@@ -606,6 +607,13 @@ export interface CreateAgentSessionOptions {
 	modelPatternFallbackRole?: string;
 	/** Validated default retry chain to install when a deferred singleton pattern resolves. */
 	modelPatternDefaultFallbackChain?: string[];
+	/**
+	 * Model preset name to start on (`--preset`): validated against the settings'
+	 * saved presets (unknown names fail startup), seeded as the session's active
+	 * preset before the preset overlay is built, and journaled as a
+	 * `preset_change` when it differs from the preset the session replayed.
+	 */
+	preset?: string;
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
@@ -1988,6 +1996,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const hasExistingSession = existingBranch.length > 0;
 	const hasThinkingEntry = existingBranch.some(entry => entry.type === "thinking_level_change");
 	const hasServiceTierEntry = existingBranch.some(entry => entry.type === "service_tier_change");
+
+	// An explicit `--preset` startup selection wins over any preset the session
+	// replayed. Validate it against the settings' saved presets (an unknown name
+	// is a hard startup error naming the available presets), then seed the
+	// replayed context so the overlay below and the constructed session both see
+	// it. Journal a `preset_change` only when it differs from the replayed
+	// preset so a bare resume does not append a redundant entry.
+	if (options.preset !== undefined) {
+		const presetLookup = getModelPreset(settings, options.preset);
+		if (presetLookup.kind !== "found") {
+			throw new CliUsageError(
+				`Unknown model preset "${options.preset}". Available presets: ${getModelPresetNames(settings).join(", ") || "(none)"}`,
+			);
+		}
+		if (existingSession.activePreset !== options.preset) {
+			sessionManager.appendPresetChange(options.preset);
+		}
+		existingSession.activePreset = options.preset;
+	}
 
 	// Session model preset: role resolution uses the 3-tier precedence
 	// (per-role override → active preset role → base `modelRoles`) via a live
@@ -4699,6 +4726,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
 			settings: sessionSettings,
+			activePreset: existingSession.activePreset,
 			additionalExtensionPaths: options.additionalExtensionPaths,
 			extensionRoots: buildSessionExtensionRoots,
 			preparedExtensions: extensionsResult.preparedExtensions,

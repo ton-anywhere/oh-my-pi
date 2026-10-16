@@ -166,6 +166,8 @@ export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** Model preset this session starts on: replayed from `preset_change` entries or seeded by the `--preset` startup flag. */
+	activePreset?: string;
 	/**
 	 * Live extension-root policy inherited from the owning session. Subagents use
 	 * this provider so explicit roots, discovery mode, configured roots, and
