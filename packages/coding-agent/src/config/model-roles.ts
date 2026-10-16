@@ -127,6 +127,28 @@ export function getKnownRoleIds(settings: Settings): string[] {
 
 	return roles;
 }
+/**
+ * Return known roles plus role keys supplied by the active session layers.
+ */
+export function getEffectiveKnownRoleIds(
+	settings: Settings,
+	activePresetRoleKeys: Iterable<string> = [],
+	sessionOverrideRoleKeys: Iterable<string> = [],
+): string[] {
+	const roles = getKnownRoleIds(settings);
+	const seen = new Set(roles);
+	for (const role of activePresetRoleKeys) {
+		if (seen.has(role)) continue;
+		seen.add(role);
+		roles.push(role);
+	}
+	for (const role of sessionOverrideRoleKeys) {
+		if (seen.has(role)) continue;
+		seen.add(role);
+		roles.push(role);
+	}
+	return roles;
+}
 
 /**
  * Get role info for a role name (built-in or custom).

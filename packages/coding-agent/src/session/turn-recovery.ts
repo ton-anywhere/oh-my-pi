@@ -1794,7 +1794,9 @@ export class TurnRecovery {
 		if (!role || role === EPHEMERAL_MODEL_CHANGE_ROLE || !currentModel) return undefined;
 		const configured = this.#host.effectiveModelRole(role);
 		if (!configured) return undefined;
-		const resolved = resolveModelOverride([configured], this.#host.modelRegistry, this.#host.settings);
+		const resolved = resolveModelOverride([configured], this.#host.modelRegistry, this.#host.settings, {
+			getModelRole: roleName => this.#host.effectiveModelRole(roleName),
+		});
 		return resolved.model && modelsAreEqual(resolved.model, currentModel) ? role : undefined;
 	}
 

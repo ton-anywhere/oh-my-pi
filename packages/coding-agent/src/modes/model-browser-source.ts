@@ -1,8 +1,8 @@
 import { type Model, resolveModelServiceTier, type ServiceTier, shouldSendServiceTier } from "@oh-my-pi/pi-ai";
 import type { ModelHubSource } from "@oh-my-pi/pi-tui/overlays/model-hub";
-import { findActiveModelPreset, getModelPresetNames } from "../config/model-presets";
+import { findActiveModelPreset, getModelPreset, getModelPresetNames } from "../config/model-presets";
 import { resolveModelRoleValue, rolePriorityDefaults } from "../config/model-resolver";
-import { getKnownRoleIds, getRoleInfo } from "../config/model-roles";
+import { getEffectiveKnownRoleIds, getRoleInfo } from "../config/model-roles";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { describeModelCompactionPoint } from "../session/model-compaction-threshold";
@@ -20,6 +20,7 @@ import {
 	cfgTierGoogle,
 	cfgTierOpenai,
 } from "../session/settings";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 
 /**
  * Supply live model-overlay preferences and runtime resolution from the host.
@@ -38,19 +39,24 @@ export function createModelBrowserSource(
 	sessionServiceTier?: (model: Model) => ServiceTier | undefined,
 	activePreset?: () => string | undefined,
 	effectiveModelRole?: (role: string) => string | undefined,
+	effectiveDefaultThinkingLevel?: () => ConfiguredThinkingLevel | undefined,
+	sessionRoleOverrides?: () => Readonly<Record<string, string>>,
 ): ModelHubSource {
 	return {
 		get revision() {
 			return settings.revision;
 		},
 		get defaultThinkingLevel() {
-			return cfgDefaultThinkingLevel.get(settings);
+			return effectiveDefaultThinkingLevel?.() ?? cfgDefaultThinkingLevel.get(settings);
 		},
 		get modelProviderOrder() {
 			return cfgModelProviderOrder.get(settings);
 		},
 		get knownRoleIds() {
-			return getKnownRoleIds(settings);
+			const presetName = activePreset?.();
+			const preset = presetName ? getModelPreset(settings, presetName) : undefined;
+			const presetRoleKeys = preset?.kind === "found" ? Object.keys(preset.preset.modelRoles) : [];
+			return getEffectiveKnownRoleIds(settings, presetRoleKeys, Object.keys(sessionRoleOverrides?.() ?? {}));
 		},
 		get mruOrder() {
 			return settings.getStorage()?.getModelUsageOrder() ?? [];
@@ -91,7 +97,11 @@ export function createModelBrowserSource(
 		getModelRoleSource: role => settings.getModelRoleSource(role),
 		getRoleInfo: role => getRoleInfo(role, settings),
 		defaultRoleChain: role => rolePriorityDefaults(role),
-		resolveRoleValue: (value, models, roleLookup) => resolveModelRoleValue(value, models, { settings, roleLookup }),
+		resolveRoleValue: (value, models, roleLookup) =>
+			resolveModelRoleValue(value, models, {
+				settings,
+				roleLookup: roleLookup ?? (effectiveModelRole ? { getModelRole: effectiveModelRole } : undefined),
+			}),
 		getModelPresets: () => ({
 			names: getModelPresetNames(settings),
 			active: activePreset?.() ?? findActiveModelPreset(settings),

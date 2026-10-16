@@ -35,6 +35,8 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 		model => ctx.session.effectiveServiceTier(model),
 		() => ctx.session.activePreset,
 		role => ctx.session.effectiveModelRole(role),
+		() => ctx.session.effectiveDefaultThinkingLevel(),
+		() => ctx.session.sessionRoleOverrides,
 	);
 	return {
 		ui: ctx.ui,
