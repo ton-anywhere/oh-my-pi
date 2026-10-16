@@ -9,6 +9,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { computeDefaultSessionDir } from "./session-paths";
+import type { SessionRepository } from "./session-entries";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./session-index";
 
@@ -33,6 +34,7 @@ export interface SessionInfo {
 	id: string;
 	/** Working directory where the session was started. Empty string for old sessions. */
 	cwd: string;
+	repository?: SessionRepository;
 	title?: string;
 	/** Path to the parent session (if this session was forked). */
 	parentSessionPath?: string;
@@ -318,11 +320,41 @@ interface SessionListHeader {
 	title?: string;
 	parentSession?: string;
 	timestamp?: string;
+	repository?: SessionRepository;
 }
 
 function normalizeTitleOverride(title: string | undefined): string | null | undefined {
 	if (title === undefined) return undefined;
 	return title.trim() ? title : null;
+}
+
+function parseSessionRepository(value: unknown): SessionRepository | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	const record = value as Record<string, unknown>;
+	if (
+		typeof record.sessionWorktreeRoot !== "string" ||
+		!record.sessionWorktreeRoot ||
+		!path.isAbsolute(record.sessionWorktreeRoot) ||
+		typeof record.primaryWorktreeRoot !== "string" ||
+		!record.primaryWorktreeRoot ||
+		!path.isAbsolute(record.primaryWorktreeRoot)
+	) {
+		return undefined;
+	}
+	return {
+		sessionWorktreeRoot: record.sessionWorktreeRoot,
+		primaryWorktreeRoot: record.primaryWorktreeRoot,
+	};
+}
+
+function parseSessionRepositoryLine(line: string): SessionRepository | undefined {
+	try {
+		const parsed: unknown = JSON.parse(line);
+		if (typeof parsed !== "object" || parsed === null) return undefined;
+		return parseSessionRepository((parsed as Record<string, unknown>).repository);
+	} catch {
+		return undefined;
+	}
 }
 
 function sessionListHeaderFromRecord(
@@ -340,6 +372,7 @@ function sessionListHeaderFromRecord(
 				: (titleOverride ?? (typeof record.title === "string" ? record.title : undefined)),
 		parentSession: typeof record.parentSession === "string" ? record.parentSession : undefined,
 		timestamp: typeof record.timestamp === "string" ? record.timestamp : undefined,
+		repository: parseSessionRepository(record.repository),
 	};
 }
 
@@ -354,6 +387,7 @@ function parseSessionListHeaderLine(line: string, titleOverride?: string | null)
 		title: titleOverride === null ? undefined : (titleOverride ?? extractStringProperty(line, "title")),
 		parentSession: extractStringProperty(line, "parentSession"),
 		timestamp: extractStringProperty(line, "timestamp"),
+		repository: parseSessionRepositoryLine(line),
 	};
 }
 
@@ -484,6 +518,7 @@ async function scanSessionFile(
 			path: file,
 			id: header.id,
 			cwd: header.cwd ?? "",
+			repository: header.repository,
 			title: header.title ?? shortSummary,
 			parentSessionPath: header.parentSession,
 			created: new Date(header.timestamp ?? ""),
