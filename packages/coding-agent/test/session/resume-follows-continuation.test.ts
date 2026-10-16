@@ -329,7 +329,8 @@ describe("--resume of a session that continued in a sibling file", () => {
 						: resumeArgs(original);
 
 			const followed: SessionContinuation[] = [];
-			const manager = await createSessionManager(args, tempDir.path(), stubSettings, async () => "unavailable", {
+			const manager = await createSessionManager(args, tempDir.path(), stubSettings, {
+				interactive: false,
 				onSessionContinuation: c => followed.push(c),
 			});
 			if (!manager) throw new Error("Expected a resumed session");
@@ -365,7 +366,6 @@ describe("--resume of a session that continued in a sibling file", () => {
 			continueArgs(tempDir.path()),
 			tempDir.path(),
 			stubSettings,
-			undefined,
 			{
 				onSessionContinuation: c => followed.push(c),
 			},
@@ -445,7 +445,7 @@ describe("--resume of a session that continued in a sibling file", () => {
 				resumeArgs(original),
 				tempDir.path(),
 				stubSettings,
-				async () => "unavailable",
+				{ interactive: false },
 			);
 			if (!manager) throw new Error("Expected a resumed session");
 			const notices: SessionPersistenceNotice[] = [];
@@ -594,7 +594,7 @@ describe("--resume of a session that continued in a sibling file", () => {
 		expect(writer.getSessionFile()).toBe(last);
 
 		const followed: SessionContinuation[] = [];
-		const manager = await createSessionManager(resumeArgs(original), tempDir.path(), stubSettings, undefined, {
+		const manager = await createSessionManager(resumeArgs(original), tempDir.path(), stubSettings, {
 			onSessionContinuation: c => followed.push(c),
 		});
 		try {
@@ -675,7 +675,7 @@ describe("--resume of a session that continued in a sibling file", () => {
 
 			const followed: SessionContinuation[] = [];
 			const args = by === "id" ? resumeArgs(sessionId, tempDir.path()) : resumeArgs(original);
-			const manager = await createSessionManager(args, tempDir.path(), stubSettings, undefined, {
+			const manager = await createSessionManager(args, tempDir.path(), stubSettings, {
 				onSessionContinuation: c => followed.push(c),
 			});
 			try {
