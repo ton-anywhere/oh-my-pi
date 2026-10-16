@@ -589,6 +589,123 @@ describe("model presets", () => {
 		expect(streamed).toEqual(["claude-opus-4-5"]);
 	});
 
+	it("rebinds a live preset alias edit in the next stream", async () => {
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		settings.setModelRole("default", SONNET);
+		cfgModelPresets.setEntry(settings, "alias", {
+			modelRoles: { default: "@slow", slow: SONNET_46 },
+			defaultThinkingLevel: Effort.Low,
+		});
+
+		const streamed: Array<{ id: string; reasoning: Effort | undefined }> = [];
+		const inner = createMockModel({ responses: [{ content: ["Done"] }] });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: bundled(SONNET), systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				streamed.push({ id: model.id, reasoning: options?.reasoning });
+				return inner.stream(model, context, options);
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		sessions.push(session);
+
+		const rebound = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "thinking_level_changed" && event.thinkingLevel === Effort.High) rebound.resolve();
+		});
+		expect((await applyModelPreset(settings, session, "alias")).kind).toBe("switched");
+		cfgModelPresets.setEntry(settings, "alias", {
+			modelRoles: { default: "@slow", slow: OPUS },
+			defaultThinkingLevel: Effort.High,
+		});
+		await rebound.promise;
+
+		expect(session.agent.state.model?.id).toBe("claude-opus-4-5");
+		expect(session.thinkingLevel).toBe(Effort.High);
+		await session.prompt("hello");
+
+		expect(streamed).toEqual([{ id: "claude-opus-4-5", reasoning: Effort.High }]);
+	});
+
+	it("restores a target preset alias during a session switch", async () => {
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		settings.setModelRole("default", SONNET);
+		cfgModelPresets.setEntry(settings, "alias", {
+			modelRoles: { default: "@slow", slow: OPUS },
+			defaultThinkingLevel: Effort.High,
+		});
+		const dir = TempDir.createSync("@pi-model-presets-switch-");
+		tempDirs.push(dir);
+		const sessionManager = SessionManager.create(dir.path(), dir.path());
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: { model: bundled(SONNET), systemPrompt: ["Test"], tools: [], messages: [] },
+			}),
+			sessionManager,
+			settings,
+			modelRegistry,
+		});
+		sessions.push(session);
+
+		const target = SessionManager.create(dir.path(), dir.path());
+		target.appendModelChange(SONNET);
+		target.appendThinkingLevelChange(Effort.Low, Effort.Low);
+		target.appendPresetChange("alias");
+		target.appendMessage({ role: "user", content: "target", timestamp: Date.now() });
+		await target.ensureOnDisk();
+		const targetFile = target.getSessionFile();
+		if (!targetFile) throw new Error("Expected target session file");
+
+		await expect(session.switchSession(targetFile)).resolves.toBe(true);
+
+		expect(session.agent.state.model?.id).toBe("claude-opus-4-5");
+		expect(session.thinkingLevel).toBe(Effort.High);
+	});
+
+	it("rebinds model and thinking when tree navigation enters another preset branch", async () => {
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		settings.setModelRole("default", SONNET);
+		cfgModelPresets.setEntry(settings, "low", {
+			modelRoles: { default: SONNET_46 },
+			defaultThinkingLevel: Effort.Low,
+		});
+		cfgModelPresets.setEntry(settings, "high", {
+			modelRoles: { default: OPUS },
+			defaultThinkingLevel: Effort.High,
+		});
+		const sessionManager = SessionManager.inMemory();
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: { model: bundled(SONNET), systemPrompt: ["Test"], tools: [], messages: [] },
+			}),
+			sessionManager,
+			settings,
+			modelRegistry,
+		});
+		sessions.push(session);
+
+		const root = sessionManager.appendMessage({ role: "user", content: "root", timestamp: Date.now() });
+		sessionManager.appendPresetChange("low");
+		const lowMessage = sessionManager.appendMessage({ role: "user", content: "low", timestamp: Date.now() });
+		sessionManager.branch(root);
+		sessionManager.appendPresetChange("high");
+		const highMessage = sessionManager.appendMessage({ role: "user", content: "high", timestamp: Date.now() });
+
+		await session.navigateTree(lowMessage);
+		expect(session.agent.state.model?.id).toBe("claude-sonnet-4-6");
+		expect(session.thinkingLevel).toBe(Effort.Low);
+
+		await session.navigateTree(highMessage);
+		expect(session.agent.state.model?.id).toBe("claude-opus-4-5");
+		expect(session.thinkingLevel).toBe(Effort.High);
+	});
+
 	it("saveModelPreset through the session's settings reaches the shared config", async () => {
 		const dir = TempDir.createSync("@pi-model-presets-persist-");
 		tempDirs.push(dir);

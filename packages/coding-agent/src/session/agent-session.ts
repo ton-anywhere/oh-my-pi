@@ -10105,6 +10105,73 @@ export class AgentSession implements SettingsScope {
 		}
 		return parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings));
 	}
+	#sessionModelCandidates(): Model[] {
+		const scoped = this.scopedModels;
+		return scoped.length > 0 ? scoped.map(entry => entry.model) : this.getAvailableModels();
+	}
+
+	#hasExplicitThinkingOverride(model: Model): boolean {
+		let latestPresetChange = -1;
+		let latestThinkingChange = -1;
+		const branch = this.sessionManager.getBranch();
+		for (const [index, entry] of branch.entries()) {
+			if (entry.type === "preset_change") latestPresetChange = index;
+			else if (entry.type === "thinking_level_change") latestThinkingChange = index;
+		}
+		if (latestThinkingChange <= latestPresetChange) return false;
+		const thinkingEntry = branch[latestThinkingChange];
+		if (!thinkingEntry || thinkingEntry.type !== "thinking_level_change") return false;
+		const configured = parseConfiguredThinkingLevel(thinkingEntry.configured ?? thinkingEntry.thinkingLevel);
+		const preset = this.#activePreset ? getModelPreset(this.settings, this.#activePreset) : undefined;
+		if (preset?.kind === "found" && preset.preset.defaultThinkingLevel !== undefined) {
+			return configured !== preset.preset.defaultThinkingLevel;
+		}
+		const automaticDefault =
+			model.thinking?.defaultLevel ?? parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings));
+		return configured !== automaticDefault;
+	}
+
+	#resolvePresetThinkingLevel(
+		resolved: ResolvedModelRoleValue | undefined,
+		model: Model,
+		fallback: ConfiguredThinkingLevel | undefined,
+	): ConfiguredThinkingLevel | undefined {
+		if (this.#hasExplicitThinkingOverride(model)) return fallback;
+		if (
+			resolved?.explicitThinkingLevel &&
+			resolved.thinkingLevel !== undefined &&
+			resolved.thinkingLevel !== "inherit"
+		) {
+			return resolved.thinkingLevel;
+		}
+		const preset = this.#activePreset ? getModelPreset(this.settings, this.#activePreset) : undefined;
+		if (preset?.kind === "found" && preset.preset.defaultThinkingLevel !== undefined) {
+			return preset.preset.defaultThinkingLevel;
+		}
+		return (
+			model.thinking?.defaultLevel ??
+			parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings)) ??
+			fallback
+		);
+	}
+
+	async #rebindEffectivePresetState(): Promise<void> {
+		if (!this.#activePreset) return;
+		const roleValue = this.effectiveModelRole("default");
+		const resolved = roleValue
+			? resolveModelRoleValue(roleValue, this.#sessionModelCandidates(), {
+					settings: this.settings,
+					roleLookup: { getModelRole: role => this.effectiveModelRole(role) },
+				})
+			: undefined;
+		const target =
+			resolved?.model && this.#modelRegistry.hasConfiguredAuth(resolved.model) ? resolved.model : undefined;
+		if (!target) return;
+		const thinkingLevel = this.#resolvePresetThinkingLevel(resolved, target, this.configuredThinkingLevel());
+		const modelChanged = !this.model || !modelsAreEqual(this.model, target);
+		if (modelChanged) await this.#setModelWithProviderSessionReset(target);
+		if (this.configuredThinkingLevel() !== thinkingLevel) this.setThinkingLevel(thinkingLevel);
+	}
 
 	/** Record an explicit user role selector (tier 1) and journal it. */
 	setSessionRoleOverride(role: string, selector: string): void {
@@ -10138,7 +10205,10 @@ export class AgentSession implements SettingsScope {
 		const lookup = getModelPreset(this.settings, preset);
 		const roleValue = this.effectiveModelRole("default");
 		const resolved = roleValue
-			? resolveModelRoleValue(roleValue, this.#modelRegistry.getAvailable(), { settings: this.settings })
+			? resolveModelRoleValue(roleValue, this.#sessionModelCandidates(), {
+					settings: this.settings,
+					roleLookup: { getModelRole: role => this.effectiveModelRole(role) },
+				})
 			: undefined;
 		const target =
 			resolved?.model && this.#modelRegistry.hasConfiguredAuth(resolved.model) ? resolved.model : undefined;
@@ -10156,8 +10226,14 @@ export class AgentSession implements SettingsScope {
 			} else {
 				this.#presetReResolveWarned = false;
 			}
-			if (this.model && modelsAreEqual(this.model, target)) return;
-			void this.#setModelWithProviderSessionReset(target);
+			const thinkingLevel = this.#resolvePresetThinkingLevel(resolved, target, this.configuredThinkingLevel());
+			const modelChanged = !this.model || !modelsAreEqual(this.model, target);
+			const thinkingChanged = this.configuredThinkingLevel() !== thinkingLevel;
+			if (!modelChanged && !thinkingChanged) return;
+			void (async () => {
+				if (modelChanged) await this.#setModelWithProviderSessionReset(target);
+				if (this.configuredThinkingLevel() !== thinkingLevel) this.setThinkingLevel(thinkingLevel);
+			})();
 			return;
 		}
 		// Effective default unavailable: keep the current model; warn once per condition change.
@@ -11575,9 +11651,11 @@ export class AgentSession implements SettingsScope {
 				}
 			}
 			let targetModel = explicitModel;
+			let targetResolution: ResolvedModelRoleValue | undefined;
 			let modelFallbackWarning: string | undefined;
 			if (!targetModel && !options?.keepModel && targetModelStrings.length > 0) {
-				targetModel = await this.#resolveSessionModel(targetModelStrings);
+				targetResolution = await this.#resolveSessionModel(targetModelStrings);
+				targetModel = targetResolution?.model;
 				if (!targetModel && switchingToDifferentSession) {
 					// Like startup resume: never hand the transcript to a model the
 					// session did not choose unless a UI can say so.
@@ -11670,12 +11748,17 @@ export class AgentSession implements SettingsScope {
 			// With no thinking entry, fall back to the global default so fresh sessions
 			// still classify their first turn.
 			const restoredConfigured = sessionContext.configuredThinkingLevel;
+			const restoredTargetThinking =
+				parseConfiguredThinkingLevel(restoredConfigured) ??
+				parseConfiguredThinkingLevel(sessionContext.thinkingLevel);
 			const restoredThinkingLevel: ConfiguredThinkingLevel | undefined =
-				hasThinkingEntry || (defaultThinkingLevel === AUTO_THINKING && sessionContext.thinkingLevel !== "off")
-					? restoredConfigured === AUTO_THINKING
-						? AUTO_THINKING
-						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
-					: defaultThinkingLevel;
+				this.#activePreset && model
+					? this.#resolvePresetThinkingLevel(targetResolution, model, restoredTargetThinking)
+					: hasThinkingEntry || (defaultThinkingLevel === AUTO_THINKING && sessionContext.thinkingLevel !== "off")
+						? restoredConfigured === AUTO_THINKING
+							? AUTO_THINKING
+							: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
+						: defaultThinkingLevel;
 			this.#models.restoreThinkingLevel(restoredThinkingLevel);
 			this.#models.restoreServiceTiers(
 				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
@@ -11824,11 +11907,15 @@ export class AgentSession implements SettingsScope {
 	 * none is in the catalog, refresh the discovery-backed providers among them
 	 * once and retry.
 	 */
-	async #resolveSessionModel(selectors: readonly string[]): Promise<Model | undefined> {
-		const resolve = (): Model | undefined => {
+	async #resolveSessionModel(selectors: readonly string[]): Promise<ResolvedModelRoleValue | undefined> {
+		const resolve = (): ResolvedModelRoleValue | undefined => {
+			const availableModels = this.#sessionModelCandidates();
 			for (const selector of selectors) {
-				const restored = resolveSessionModelSelector(this.#modelRegistry, selector);
-				if (restored) return restored.model;
+				const restored = resolveModelRoleValue(selector, availableModels, {
+					settings: this.settings,
+					roleLookup: { getModelRole: role => this.effectiveModelRole(role) },
+				});
+				if (restored.model && this.#modelRegistry.hasConfiguredAuth(restored.model)) return restored;
 			}
 			return undefined;
 		};
@@ -11962,6 +12049,7 @@ export class AgentSession implements SettingsScope {
 			// Reload messages from entries (works for both file and in-memory mode)
 			const sessionContext = this.buildDisplaySessionContext();
 			this.#restorePresetState(sessionContext);
+			await this.#rebindEffectivePresetState();
 
 			// Emit session_branch event to hooks (after branch completes)
 			if (this.#extensionRunner) {
@@ -12084,6 +12172,7 @@ export class AgentSession implements SettingsScope {
 
 			const sessionContext = this.buildDisplaySessionContext();
 			this.#restorePresetState(sessionContext);
+			await this.#rebindEffectivePresetState();
 
 			if (this.#extensionRunner) {
 				await this.#extensionRunner.emit({
@@ -12420,6 +12509,7 @@ export class AgentSession implements SettingsScope {
 		// The target branch's own preset state: navigating within a session can
 		// cross branches that recorded different presets or overrides.
 		this.#restorePresetState(stateContext);
+		await this.#rebindEffectivePresetState();
 		this.agent.replaceMessages(displayContext.messages);
 		this.#rehydrateCheckpointRewindState();
 		this.#advisors.resetSessionState({ preserveCost: true });
