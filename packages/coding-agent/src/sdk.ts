@@ -75,6 +75,7 @@ import {
 	resolveCliModel,
 	type ResolveCliModelResult,
 	resolveConfiguredModelPatterns,
+	expandRoleAlias,
 	resolveModelRoleValue,
 	resolveSessionModelSelector,
 	sessionModelDiscoveryProviders,
@@ -2054,7 +2055,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			let failedSessionModel: string | undefined;
 			for (let i = 0; i < sessionModelStrings.length; i++) {
 				const sessionModelStr = sessionModelStrings[i];
-				const restored = resolveSessionModelSelector(modelRegistry, sessionModelStr);
+				const restored = resolveSessionModelSelector(
+					modelRegistry,
+					expandRoleAlias(sessionModelStr, effectiveRoleLookup),
+				);
 				if (restored) {
 					model = restored.model;
 					restoredSessionModelIndex = i;
@@ -2833,7 +2837,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (!hasExplicitModel && sessionRetryLimit > 0) {
 			const restoreSessionModel = (): boolean => {
 				for (let i = 0; i < sessionRetryLimit; i++) {
-					const restored = resolveSessionModelSelector(modelRegistry, sessionModelStrings[i]);
+					const restored = resolveSessionModelSelector(
+						modelRegistry,
+						expandRoleAlias(sessionModelStrings[i], effectiveRoleLookup),
+					);
 					if (restored) {
 						const restoredModel = restored.model;
 						model = restoredModel;
@@ -2860,7 +2867,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// in the SDK's startup background refresh.
 				const candidateProviders = sessionModelDiscoveryProviders(
 					modelRegistry,
-					sessionModelStrings.slice(0, sessionRetryLimit),
+					sessionModelStrings
+						.slice(0, sessionRetryLimit)
+						.map(selector => expandRoleAlias(selector, effectiveRoleLookup)),
 					disabledProviderIds(settings),
 				);
 				if (candidateProviders.size > 0) {

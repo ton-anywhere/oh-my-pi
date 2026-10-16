@@ -25,7 +25,6 @@ import {
 	type ResolvedModelRoleValue,
 	resolveModelRoleValue,
 } from "../config/model-resolver";
-import { getKnownRoleIds } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import type { MagicKeywordId } from "../modes/magic-keywords";
@@ -55,7 +54,8 @@ export interface ModelControlsHost {
 	settings: Settings;
 	/** The session's effective selector for `role`: explicit override → active preset → base settings. */
 	effectiveModelRole(role: string): string | undefined;
-	/** Records an explicit user role selection (tier 1) and journals it. */
+	/** Effective built-in, preset, and explicit session roles for selector scans. */
+	getEffectiveKnownRoleIds(): readonly string[];
 	setSessionRoleOverride(role: string, selector: string): void;
 	modelRegistry: ModelRegistry;
 	sessionManager: SessionManager;
@@ -214,7 +214,7 @@ export class ModelControls {
 		if (availableModels.length === 0) return undefined;
 
 		const matchPreferences = getModelMatchPreferences(this.#host.settings);
-		for (const role of getKnownRoleIds(this.#host.settings)) {
+		for (const role of this.#host.getEffectiveKnownRoleIds()) {
 			const roleValue = this.#host.effectiveModelRole(role);
 			if (!roleValue) continue;
 
@@ -703,7 +703,7 @@ export class ModelControls {
 		this.#thinkingLevel = effort;
 		this.#applyThinkingLevelToAgent(effort);
 		if (shouldPersistResolution) {
-			this.#host.sessionManager.appendThinkingLevelChange(effort, AUTO_THINKING);
+			this.#host.sessionManager.appendThinkingLevelChange(effort, AUTO_THINKING, false);
 		}
 		this.#host.emit({
 			type: "thinking_level_changed",

@@ -395,3 +395,44 @@ describe("buildSessionContext active preset", () => {
 		expect(manager.buildSessionContext().activePreset).toBe("b");
 	});
 });
+describe("buildSessionContext thinking receipts", () => {
+	it("keeps an explicit selector after a later automatic resolution", () => {
+		const context = buildSessionContext([
+			{
+				type: "thinking_level_change",
+				id: "explicit",
+				parentId: null,
+				timestamp,
+				thinkingLevel: "medium",
+				configured: "auto",
+				explicit: true,
+			},
+			{
+				type: "thinking_level_change",
+				id: "automatic",
+				parentId: "explicit",
+				timestamp,
+				thinkingLevel: "high",
+				configured: "auto",
+				explicit: false,
+			},
+		]);
+
+		expect(context.configuredThinkingLevel).toBe("auto");
+	});
+
+	it("honors a legacy thinking receipt without an explicit marker", () => {
+		const context = buildSessionContext([
+			{
+				type: "thinking_level_change",
+				id: "legacy",
+				parentId: null,
+				timestamp,
+				thinkingLevel: "low",
+				configured: "low",
+			},
+		]);
+
+		expect(context.configuredThinkingLevel).toBe("low");
+	});
+});

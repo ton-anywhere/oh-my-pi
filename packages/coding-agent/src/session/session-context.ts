@@ -322,7 +322,9 @@ export function buildSessionContext(
 	for (const entry of path) {
 		if (entry.type === "thinking_level_change") {
 			thinkingLevel = entry.thinkingLevel ?? "off";
-			configuredThinkingLevel = entry.explicit ? (entry.configured ?? entry.thinkingLevel ?? undefined) : undefined;
+			if (entry.explicit !== false) {
+				configuredThinkingLevel = entry.configured ?? entry.thinkingLevel ?? undefined;
+			}
 		} else if (entry.type === "model_change") {
 			// New format: { model: "provider/id", role?: string }
 			if (entry.model) {

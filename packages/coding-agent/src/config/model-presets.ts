@@ -188,11 +188,11 @@ export interface ModelPresetShadowedRole {
 	source: SettingProvenance | "session";
 }
 
-/** The preset's thinking default differs from the effective base setting. */
+/** The preset's thinking default differs from the target session's effective setting. */
 export interface ModelPresetShadowedThinking {
 	expected: NonNullable<ModelPreset["defaultThinkingLevel"]>;
-	actual: ModelPreset["defaultThinkingLevel"];
-	source: SettingProvenance;
+	actual: ConfiguredThinkingLevel | undefined;
+	source: SettingProvenance | "session";
 }
 
 export type ModelPresetSwitchResult =
@@ -202,7 +202,7 @@ export type ModelPresetSwitchResult =
 			thinkingLevel: ConfiguredThinkingLevel | undefined;
 			/** Roles an explicit session override still decides; empty on a clean switch. */
 			shadowed: ModelPresetShadowedRole[];
-			/** Thinking default the durable base still decides; undefined on a clean switch. */
+			/** Thinking default the target effective session decides; undefined on a clean switch. */
 			shadowedThinking: ModelPresetShadowedThinking | undefined;
 	  }
 	| { kind: "missing" }
@@ -222,6 +222,8 @@ export type ModelPresetSession = Pick<
 	| "sessionRoleOverrides"
 	| "effectiveModelRoles"
 	| "effectiveDefaultThinkingLevel"
+	| "configuredThinkingLevel"
+	| "hasExplicitThinkingOverride"
 	| "getAvailableModels"
 	| "scopedModels"
 	| "modelRegistry"
@@ -273,12 +275,21 @@ function targetShadowedRoles(
 	return shadowed;
 }
 
-function targetShadowedThinking(settings: Settings, preset: ModelPreset): ModelPresetShadowedThinking | undefined {
+function targetShadowedThinking(
+	settings: Settings,
+	session: ModelPresetSession,
+	preset: ModelPreset,
+): ModelPresetShadowedThinking | undefined {
 	const expected = preset.defaultThinkingLevel;
 	if (expected === undefined) return undefined;
-	const actual = cfgDefaultThinkingLevel.get(settings);
+	const sessionOverride = session.hasExplicitThinkingOverride();
+	const actual = sessionOverride ? session.configuredThinkingLevel() : expected;
 	if (actual === expected) return undefined;
-	return { expected, actual, source: cfgDefaultThinkingLevel.provenance(settings) };
+	return {
+		expected,
+		actual,
+		source: sessionOverride ? "session" : cfgDefaultThinkingLevel.provenance(settings),
+	};
 }
 
 /**
@@ -327,7 +338,7 @@ async function applyModelPresetLocked(
 	};
 
 	const shadowed = targetShadowedRoles(settings, session, preset);
-	const shadowedThinking = targetShadowedThinking(settings, preset);
+	const shadowedThinking = targetShadowedThinking(settings, session, preset);
 	const presetDefault =
 		session.sessionRoleOverrides["default"] ??
 		(Object.hasOwn(preset.modelRoles, "default") ? preset.modelRoles.default : undefined);

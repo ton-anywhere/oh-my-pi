@@ -3416,7 +3416,7 @@ export class SessionManager {
 			...this.#freshEntryFields(),
 			thinkingLevel: thinkingLevel ?? null,
 			configured: configured ?? null,
-			...(explicit ? { explicit: true } : {}),
+			explicit,
 		};
 		this.#recordEntry(entry);
 		return entry.id;

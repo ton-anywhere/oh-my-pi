@@ -13,6 +13,7 @@ import { cfgModelPresets, cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 
 import {
+	cfgIncludeModelInPrompt,
 	cfgIncludeWorkspaceTree,
 	cfgOmitThinking,
 	cfgPersonality,
@@ -167,6 +168,22 @@ describe("AgentSession live settings", () => {
 
 		expect(live.activePreset).toBe("p");
 		expect(live.resolveRoleModel("default")?.id).toBe("gpt-4.1");
+	});
+	it("refreshes the model-dependent prompt after a preset rebind", async () => {
+		const settings = Settings.isolated();
+		cfgIncludeModelInPrompt.set(settings, true);
+		cfgModelRoles.setEntry(settings, "default", "openai/gpt-4o-mini");
+		cfgModelPresets.setEntry(settings, "p", { modelRoles: { default: "openai/gpt-4o" } });
+		const live = await start(settings);
+		const before = live.systemPrompt.join("\n");
+		const target = getBundledModel("openai", "gpt-4o");
+		if (!target) throw new Error("Expected bundled openai/gpt-4o model");
+
+		await live.setActivePreset("p", target, undefined);
+		await live.runToolRegistryMutation(async () => {});
+
+		expect(live.systemPrompt.join("\n")).not.toBe(before);
+		expect(live.systemPrompt.join("\n")).toContain("openai/gpt-4o");
 	});
 
 	it("a deleted active preset falls back to the base default, warns once, and retains the name", async () => {
