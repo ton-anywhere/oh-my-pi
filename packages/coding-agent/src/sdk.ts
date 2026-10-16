@@ -2440,6 +2440,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getSessionAgents: () => session?.getSessionAgents() ?? [],
 			advertisedSessionAgents: () => session?.getAdvertisedSessionAgents() ?? [],
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
+			getEffectiveModelRole: role => session?.effectiveModelRole(role),
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
 			getServiceTierByFamily: () => session?.serviceTierByFamily,

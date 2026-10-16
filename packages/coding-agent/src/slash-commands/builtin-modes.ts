@@ -67,6 +67,7 @@ function resolveSessionModelSelector(
 		modelRegistry: session.modelRegistry,
 		availableModels: scoped.length > 0 ? scoped : undefined,
 		settings,
+		roleLookup: { getModelRole: role => session.effectiveModelRole(role) },
 		preferences: getModelMatchPreferences(settings),
 	});
 }

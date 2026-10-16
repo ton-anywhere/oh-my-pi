@@ -228,6 +228,7 @@ export class ModelControls {
 
 			const resolved = resolveModelRoleValue(roleValue, availableModels, {
 				settings: this.#host.settings,
+				roleLookup: { getModelRole: role => this.#host.effectiveModelRole(role) },
 				matchPreferences,
 			});
 			if (!resolved.explicitThinkingLevel || resolved.thinkingLevel === undefined || !resolved.model) continue;
@@ -364,6 +365,7 @@ export class ModelControls {
 
 			const resolved = resolveModelRoleValue(roleModelStr, availableModels, {
 				settings: this.#host.settings,
+				roleLookup: { getModelRole: role => this.#host.effectiveModelRole(role) },
 				matchPreferences,
 			});
 			if (!resolved.model) continue;
