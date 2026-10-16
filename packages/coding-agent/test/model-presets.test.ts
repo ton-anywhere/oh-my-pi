@@ -458,7 +458,7 @@ describe("model presets", () => {
 		expect(order).toEqual(["first", "second"]);
 	});
 
-	it("reports a shadowed base thinking level while applying the preset level live", async () => {
+	it("reports no thinking shadow when the preset level wins at the target", async () => {
 		const settings = await projectSettings({ project: "defaultThinkingLevel: high\n" });
 		cfgModelPresets.setEntry(settings, "cheap", {
 			modelRoles: { default: OPUS },
@@ -471,13 +471,27 @@ describe("model presets", () => {
 		if (result.kind !== "switched") throw new Error(`expected switched, got ${result.kind}`);
 		expect(session.thinkingLevel).toBe(Effort.Low);
 		expect(result.shadowed).toEqual([]);
+		expect(result.shadowedThinking).toBeUndefined();
+		expect(isCleanModelPresetSwitch(result)).toBe(true);
+	});
+	it("reports an explicit session thinking override as the target shadow", async () => {
+		const settings = Settings.isolated();
+		cfgModelPresets.setEntry(settings, "cheap", {
+			modelRoles: { default: OPUS },
+			defaultThinkingLevel: Effort.Low,
+		});
+		const session = createSession(settings, SONNET, Effort.Low);
+		session.setThinkingLevel(Effort.High);
+
+		const result = await applyModelPreset(settings, session, "cheap");
+
+		if (result.kind !== "switched") throw new Error(`expected switched, got ${result.kind}`);
 		expect(result.shadowedThinking).toEqual({
 			expected: Effort.Low,
 			actual: Effort.High,
-			source: "project",
+			source: "session",
 		});
-		expect(isCleanModelPresetSwitch(result)).toBe(false);
-		expect(formatModelPresetSwitch("cheap", result)).toContain("defaultThinkingLevel");
+		expect(session.thinkingLevel).toBe(Effort.Low);
 	});
 
 	it("does not list a preset a --config overlay tombstones, but keeps one a project null falls through", async () => {
@@ -709,6 +723,31 @@ describe("model presets", () => {
 		await session.navigateTree(highMessage);
 		expect(session.agent.state.model?.id).toBe("claude-opus-4-5");
 		expect(session.thinkingLevel).toBe(Effort.High);
+	});
+	it("rebinds to the base model when tree navigation leaves a preset branch", async () => {
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		settings.setModelRole("default", SONNET);
+		cfgModelPresets.setEntry(settings, "focus", { modelRoles: { default: OPUS } });
+		const sessionManager = SessionManager.inMemory();
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: { model: bundled(SONNET), systemPrompt: ["Test"], tools: [], messages: [] },
+			}),
+			sessionManager,
+			settings,
+			modelRegistry,
+		});
+		sessions.push(session);
+
+		const root = sessionManager.appendMessage({ role: "user", content: "root", timestamp: Date.now() });
+		sessionManager.appendPresetChange("focus");
+		const presetMessage = sessionManager.appendMessage({ role: "user", content: "preset", timestamp: Date.now() });
+
+		await session.navigateTree(presetMessage);
+		expect(session.agent.state.model?.id).toBe("claude-opus-4-5");
+
+		await session.navigateTree(root);
+		expect(session.agent.state.model?.id).toBe("claude-sonnet-4-5");
 	});
 
 	it("saveModelPreset through the session's settings reaches the shared config", async () => {

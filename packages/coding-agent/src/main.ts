@@ -1471,6 +1471,7 @@ export async function buildSessionOptions(
 			modelRegistry,
 			availableModels: modelRegistry.getAvailable(),
 			settings: activeSettings,
+			roleLookup: startupRoleLookup,
 			preferences: modelMatchPreferences,
 		});
 		if (resolved.warning) {

@@ -6,6 +6,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { cfgModelPresets } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -117,6 +118,20 @@ describe("--preset CLI flag", () => {
 		// The preset fills the remaining roles.
 		expect(session.effectiveModelRole("smol")).toBe(SONNET_46);
 	});
+	it("restores an active preset default through its effective role alias", async () => {
+		const settings = Settings.isolated();
+		settings.setModelRole("default", SONNET);
+		cfgModelPresets.setEntry(settings, "p", {
+			modelRoles: { default: "@slow", slow: OPUS },
+		});
+		const sessionManager = SessionManager.inMemory(fixtureDir.path());
+		sessionManager.appendPresetChange("p");
+
+		const session = await startSession({ settings, sessionManager });
+
+		expect(session.activePreset).toBe("p");
+		expect(session.model?.id).toBe("claude-opus-4-5");
+	});
 
 	it("applies a preset defaultThinkingLevel over the selected model default", async () => {
 		const settings = Settings.isolated();
@@ -129,6 +144,31 @@ describe("--preset CLI flag", () => {
 		const session = await startSession({ settings, preset: "p" });
 
 		expect(session.thinkingLevel).toBe(Effort.Low);
+	});
+	it("starts --preset with --model alias resolved against preset roles", async () => {
+		const settings = presetSettings();
+		const rawArgs = ["--preset", "p", "--model", "@slow", "--print", "hello"];
+		const parsed = parseArgs(rawArgs);
+		parsed.noExtensions = true;
+		parsed.noSkills = true;
+		parsed.noRules = true;
+		parsed.noTools = true;
+		parsed.noLsp = true;
+		parsed.sessionDir = path.join(fixtureDir.path(), "sessions");
+		let observedModel: Model | undefined;
+
+		await expect(
+			runRootCommand(parsed, rawArgs, {
+				settings,
+				discoverAuthStorage: async () => authStorage,
+				createAgentSession: async options => {
+					observedModel = options?.model;
+					throw new Error("stop after session options");
+				},
+			}),
+		).rejects.toThrow("stop after session options");
+
+		expect(observedModel && `${observedModel.provider}/${observedModel.id}`).toBe(OPUS);
 	});
 
 	it("rejects an unknown preset at startup, naming the available presets", async () => {
