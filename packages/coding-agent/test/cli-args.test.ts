@@ -97,7 +97,7 @@ describe("--preset CLI flag", () => {
 		// The preset's default role selects the session model.
 		expect(session.model?.id).toBe("claude-opus-4-5");
 		// The preset fills the remaining roles.
-		expect(session.settings.getModelRole("smol")).toBe(SONNET_46);
+		expect(session.effectiveModelRole("smol")).toBe(SONNET_46);
 	});
 
 	it("rejects an unknown preset at startup, naming the available presets", async () => {
@@ -126,7 +126,7 @@ describe("--preset CLI flag", () => {
 
 		expect(session.activePreset).toBe("p");
 		expect(session.model?.id).toBe("claude-sonnet-4-5");
-		expect(session.settings.getModelRole("smol")).toBe(SONNET_46);
+		expect(session.effectiveModelRole("smol")).toBe(SONNET_46);
 	});
 
 	it("wins over the preset a resumed session replayed and journals the switch", async () => {

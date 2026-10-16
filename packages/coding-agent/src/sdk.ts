@@ -79,7 +79,7 @@ import {
 	resolveSessionModelSelector,
 	sessionModelDiscoveryProviders,
 } from "./config/model-resolver";
-import { buildPresetOverlay, getModelPreset, getModelPresetNames } from "./config/model-presets";
+import { getModelPreset, getModelPresetNames } from "./config/model-presets";
 import { CliUsageError } from "./cli/usage-error";
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
@@ -1965,10 +1965,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		existingSession.activePreset = options.preset;
 	}
 
-	// Session model preset: role resolution uses the 3-tier precedence
-	// (per-role override → active preset role → base `modelRoles`) via a live
-	// overlay child. Passes the base through when no preset is active.
-	const sessionSettings = buildPresetOverlay(settings, existingSession.activePreset, existingSession.models);
+	// Session model presets: the active preset's roles are resolved on the fly
+	// (explicit session override → active preset role → base `modelRoles`); the
+	// session's `Settings` stays the durable base.
+	const sessionRoleOverrides = existingSession.explicitRoleOverrides;
+	const effectiveRole = (role: string): string | undefined => {
+		const override = sessionRoleOverrides[role];
+		if (override !== undefined) return override;
+		const presetName = existingSession.activePreset;
+		if (presetName) {
+			const preset = getModelPreset(settings, presetName);
+			if (preset.kind === "found" && preset.preset.modelRoles[role] !== undefined) {
+				return preset.preset.modelRoles[role];
+			}
+		}
+		return settings.getModelRole(role);
+	};
 
 	const deferredModelPatterns = Array.isArray(options.modelPattern)
 		? options.modelPattern.map(pattern => pattern.trim()).filter(Boolean)
@@ -1977,7 +1989,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			: [];
 	const hasExplicitModel = options.model !== undefined || deferredModelPatterns.length > 0;
 	const modelMatchPreferences = getModelMatchPreferences(settings);
-	const defaultRoleValue = sessionSettings.getModelRole("default");
+	const defaultRoleValue = effectiveRole("default");
 	let explicitDefaultProviders: Set<string> | undefined;
 	if ((cfgEnabledModels.get(settings)?.length ?? 0) === 0) {
 		const patterns = resolveConfiguredModelPatterns(defaultRoleValue, settings);
@@ -2006,8 +2018,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	);
 	let defaultRoleSpec = logger.time("resolveDefaultModelRole", () =>
 		resolveModelRoleValue(defaultRoleValue, allowedModels, {
-			settings: sessionSettings,
+			settings,
 			matchPreferences: modelMatchPreferences,
+			roleLookup: { getModelRole: effectiveRole },
 		}),
 	);
 	let model = options.model;
@@ -2018,10 +2031,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// host preconnect) can use the restored model; extension-registered
 	// providers aren't visible yet, so we retry the preferred candidates once
 	// extensions register below.
-	const sessionModelStrings =
+	let sessionModelStrings =
 		!hasExplicitModel && hasExistingSession
 			? getRestorableSessionModels(existingSession.models, sessionManager.getLastModelChangeRole())
 			: [];
+	if (!hasExplicitModel && existingSession.activePreset) {
+		// The preset's current definition decides the default model first; the
+		// journal receipts are the fallback when the def no longer resolves.
+		const presetDefault = effectiveRole("default");
+		if (presetDefault) {
+			sessionModelStrings = [presetDefault, ...sessionModelStrings.filter(s => s !== presetDefault)];
+		}
+	}
 	let restoredSessionModelIndex = -1;
 	let restoredSessionThinkingLevel: ConfiguredThinkingLevel | undefined;
 	if (!hasExplicitModel && !model && sessionModelStrings.length > 0) {
@@ -2080,7 +2101,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			level = selectedModel.thinking.defaultLevel;
 		}
 		if (level === undefined) {
-			level = parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(settings));
+			// The active preset's defaultThinkingLevel (when it records one) wins
+			// over the base settings' default.
+			const preset = existingSession.activePreset
+				? getModelPreset(settings, existingSession.activePreset)
+				: undefined;
+			level =
+				(preset?.kind === "found" ? preset.preset.defaultThinkingLevel : undefined) ??
+				parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(settings));
 		}
 		return level;
 	};
@@ -4593,9 +4621,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
-			settings: sessionSettings,
-			baseSettings: settings,
+			settings,
 			activePreset: existingSession.activePreset,
+			sessionRoleOverrides: existingSession.explicitRoleOverrides,
 			additionalExtensionPaths: options.additionalExtensionPaths,
 			extensionRoots: buildSessionExtensionRoots,
 			preparedExtensions: extensionsResult.preparedExtensions,

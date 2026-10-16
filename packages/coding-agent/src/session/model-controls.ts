@@ -53,6 +53,10 @@ import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings
 export interface ModelControlsHost {
 	agent: Agent;
 	settings: Settings;
+	/** The session's effective selector for `role`: explicit override → active preset → base settings. */
+	effectiveModelRole(role: string): string | undefined;
+	/** Records an explicit user role selection (tier 1) and journals it. */
+	setSessionRoleOverride(role: string, selector: string): void;
 	modelRegistry: ModelRegistry;
 	sessionManager: SessionManager;
 	providerSessionState: Map<string, ProviderSessionState>;
@@ -194,12 +198,15 @@ export class ModelControls {
 		this.#serviceTierByFamily = tiers;
 	}
 	resolveRoleModel(role: string): Model | undefined {
-		return resolveRoleModelFull(this.#host.settings, role, this.#host.modelRegistry.getAvailable(), this.#model)
-			.model;
+		return resolveRoleModelFull(this.#host.settings, role, this.#host.modelRegistry.getAvailable(), this.#model, {
+			getModelRole: r => this.#host.effectiveModelRole(r),
+		}).model;
 	}
 
 	resolveRoleModelWithThinking(role: string): ResolvedModelRoleValue {
-		return resolveRoleModelFull(this.#host.settings, role, this.#host.modelRegistry.getAvailable(), this.#model);
+		return resolveRoleModelFull(this.#host.settings, role, this.#host.modelRegistry.getAvailable(), this.#model, {
+			getModelRole: r => this.#host.effectiveModelRole(r),
+		});
 	}
 
 	resolveTemporaryModelThinkingLevel(model: Model): ConfiguredThinkingLevel | undefined {
@@ -208,7 +215,7 @@ export class ModelControls {
 
 		const matchPreferences = getModelMatchPreferences(this.#host.settings);
 		for (const role of getKnownRoleIds(this.#host.settings)) {
-			const roleValue = this.#host.settings.getModelRole(role);
+			const roleValue = this.#host.effectiveModelRole(role);
 			if (!roleValue) continue;
 
 			const resolved = resolveModelRoleValue(roleValue, availableModels, {
@@ -241,7 +248,6 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(targetModel);
-		this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
 		if (options?.persist) {
 			this.#host.settings.setModelRole(
 				role,
@@ -254,6 +260,12 @@ export class ModelControls {
 					options.thinkingLevel,
 				),
 			);
+		} else {
+			// Session-local explicit selection: record the user's selector (or the
+			// resolved id when none was given) as a tier-1 override so live
+			// re-resolution and resume see it. Automatic receipts (initial model,
+			// preset switches) never route through here.
+			this.#host.setSessionRoleOverride(role, options?.selector ?? `${targetModel.provider}/${targetModel.id}`);
 		}
 		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
 
@@ -338,8 +350,8 @@ export class ModelControls {
 		for (const role of roleOrder) {
 			const roleModelStr =
 				role === "default"
-					? (this.#host.settings.getModelRole("default") ?? `${currentModel.provider}/${currentModel.id}`)
-					: this.#host.settings.getModelRole(role);
+					? (this.#host.effectiveModelRole("default") ?? `${currentModel.provider}/${currentModel.id}`)
+					: this.#host.effectiveModelRole(role);
 			if (!roleModelStr) continue;
 
 			const resolved = resolveModelRoleValue(roleModelStr, availableModels, {

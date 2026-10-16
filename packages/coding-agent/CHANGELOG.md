@@ -5,6 +5,7 @@
 ### Added
 
 - Added `skills.compressDescriptions` (default `true`) to disable background compression of skill descriptions: when off, skill descriptions are rendered as authored in the system prompt and no background compression model calls are made ([#13291](https://github.com/can1357/oh-my-pi/issues/13291)).
+- Added per-session model presets: `--preset <name>` starts a session on a saved preset, the model hub switches the active preset per session without writing shared config (so concurrent sessions each keep their own preset), a resumed session returns to its preset, and the hub marks the active one.
 
 ## [18.8.9] - 2026-10-10
 

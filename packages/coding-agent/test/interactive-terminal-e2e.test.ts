@@ -313,6 +313,7 @@ describe("libkitty end-to-end", () => {
 				),
 			],
 			models: {},
+			explicitRoleOverrides: {},
 			injectedTtsrRules: [],
 			mode: "none",
 		});

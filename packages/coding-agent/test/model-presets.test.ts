@@ -3,15 +3,16 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { Effort } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	acquireModelRoleMutation,
 	applyModelPreset,
-	buildPresetOverlay,
 	deleteModelPreset,
 	getModelPreset,
 	getModelPresetNames,
 	formatModelPresetSwitch,
+	isCleanModelPresetSwitch,
 	modelPresetSavedMessage,
 	modelPresetShadowOwner,
 	saveModelPreset,
@@ -92,39 +93,46 @@ describe("model presets", () => {
 		});
 	}
 
-	it("buildPresetOverlay resolves roles by precedence", () => {
-		const base = Settings.isolated();
-		base.setModelRole("default", "b/d");
-		base.setModelRole("smol", "b/s");
-		cfgModelPresets.setEntry(base, "snap", { modelRoles: { default: "p/d", slow: "p/slow" } });
+	it("effectiveModelRole resolves explicit override, active preset, then base", async () => {
+		const settings = Settings.isolated();
+		settings.setModelRole("default", SONNET);
+		settings.setModelRole("smol", SONNET_46);
+		cfgModelPresets.setEntry(settings, "snap", { modelRoles: { default: OPUS, slow: "p/slow" } });
+		const session = createSession(settings);
 
-		const overlay = buildPresetOverlay(base, "snap", { default: "o/d" });
+		// No preset active: the base decides everything.
+		expect(session.effectiveModelRole("default")).toBe(SONNET);
+		expect(session.effectiveModelRole("smol")).toBe(SONNET_46);
+		expect(session.effectiveModelRole("plan")).toBeUndefined();
 
-		expect(overlay.getModelRole("default")).toBe("o/d"); // per-role override wins
-		expect(overlay.getModelRole("slow")).toBe("p/slow"); // preset fills a base-absent role
-		expect(overlay.getModelRole("smol")).toBe("b/s"); // base fills a role the preset leaves out
+		const result = await applyModelPreset(settings, session, "snap");
+		expect(result.kind).toBe("switched");
+		// The preset fills its roles; the base fills what it leaves out.
+		expect(session.effectiveModelRole("default")).toBe(OPUS);
+		expect(session.effectiveModelRole("slow")).toBe("p/slow");
+		expect(session.effectiveModelRole("smol")).toBe(SONNET_46);
+
+		// An explicit session selector outranks the preset's own role.
+		session.setSessionRoleOverride("default", SONNET);
+		expect(session.effectiveModelRole("default")).toBe(SONNET);
+		expect(session.effectiveModelRole("slow")).toBe("p/slow");
 	});
 
-	it("buildPresetOverlay takes the preset's defaultThinkingLevel when it records one", () => {
-		const base = Settings.isolated();
-		base.setModelRole("default", "b/d");
-		cfgDefaultThinkingLevel.set(base, Effort.High);
-		cfgModelPresets.setEntry(base, "snap", { modelRoles: { default: "p/d" }, defaultThinkingLevel: Effort.Low });
+	it("effectiveDefaultThinkingLevel takes the preset's level when it records one", async () => {
+		const settings = Settings.isolated();
+		settings.setModelRole("default", SONNET);
+		cfgDefaultThinkingLevel.set(settings, Effort.High);
+		cfgModelPresets.setEntry(settings, "snap", {
+			modelRoles: { default: OPUS },
+			defaultThinkingLevel: Effort.Low,
+		});
+		const session = createSession(settings, SONNET, Effort.High);
 
-		const overlay = buildPresetOverlay(base, "snap", {});
+		expect(session.effectiveDefaultThinkingLevel()).toBe(Effort.High);
 
-		expect(overlay.getModelRole("default")).toBe("p/d");
-		expect(cfgDefaultThinkingLevel.get(overlay)).toBe(Effort.Low);
-	});
-
-	it("buildPresetOverlay passes through base roles when no preset is active", () => {
-		const base = Settings.isolated();
-		base.setModelRole("default", "b/d");
-		base.setModelRole("smol", "b/s");
-
-		const overlay = buildPresetOverlay(base, undefined, {});
-
-		expect({ ...overlay.getModelRoles() }).toEqual({ default: "b/d", smol: "b/s" });
+		const result = await applyModelPreset(settings, session, "snap");
+		expect(result.kind).toBe("switched");
+		expect(session.effectiveDefaultThinkingLevel()).toBe(Effort.Low);
 	});
 
 	it("switching replaces the whole role record and applies the preset's thinking level live", async () => {
@@ -148,6 +156,8 @@ describe("model presets", () => {
 		expect(cfgDefaultThinkingLevel.get(settings)).toBe(Effort.High);
 		expect(session.activePreset).toBe("focus");
 		expect(session.model?.id).toBe("claude-opus-4-5");
+		// The live agent state (what #runLoop sends the next request with) carries the switch.
+		expect(session.agent.state.model?.id).toBe("claude-opus-4-5");
 		// setModel alone keeps the previous `high`; the preset's `low` must win.
 		expect(session.thinkingLevel).toBe(Effort.Low);
 	});
@@ -190,7 +200,7 @@ describe("model presets", () => {
 		expect(session.thinkingLevel).toBe(Effort.Medium);
 	});
 
-	it("in project storage, the project layer shadows the preset and the shared config is untouched", async () => {
+	it("in project storage, the preset shadows the project layer and the shared config is untouched", async () => {
 		const settings = await projectSettings({
 			project: `modelRoles:\n  default: ${SONNET}\n  slow: ${SONNET_46}\n`,
 			storage: "project",
@@ -202,17 +212,16 @@ describe("model presets", () => {
 
 		expect(result.kind).toBe("switched");
 		if (result.kind !== "switched") throw new Error(`expected "switched", got ${result.kind}`);
-		// The project layer still decides both roles; the shared config is untouched.
-		expect(result.shadowed).toEqual([
-			{ role: "default", expected: OPUS, actual: SONNET, source: "project" },
-			{ role: "slow", expected: undefined, actual: SONNET_46, source: "project" },
-		]);
+		// The preset outranks the project layer for the roles it defines; roles it
+		// leaves out keep their base assignment. The shared config is untouched.
+		expect(result.shadowed).toEqual([{ role: "slow", expected: undefined, actual: SONNET_46, source: "project" }]);
+		expect(session.effectiveModelRole("default")).toBe(OPUS);
 		expect({ ...settings.getModelRoles() }).toEqual({ default: SONNET, slow: SONNET_46 });
 		expect(settings.getProjectModelRole("slow")).toBe(SONNET_46);
 		expect(session.model?.id).toBe("claude-opus-4-5");
 	});
 
-	it("reports --model style runtime role overrides as shadowed instead of replacing them", async () => {
+	it("a preset shadows --model style runtime role overrides, which stay recorded", async () => {
 		const settings = Settings.isolated();
 		settings.overrideModelRoles({ default: SONNET, smol: SONNET_46 });
 		cfgModelPresets.setEntry(settings, "opus", { modelRoles: { default: OPUS } });
@@ -222,15 +231,13 @@ describe("model presets", () => {
 
 		expect(result.kind).toBe("switched");
 		if (result.kind !== "switched") throw new Error(`expected "switched", got ${result.kind}`);
-		// The runtime overrides still decide both roles; the shared config is untouched.
-		expect(result.shadowed).toEqual([
-			{ role: "default", expected: OPUS, actual: SONNET, source: "runtime" },
-			{ role: "smol", expected: undefined, actual: SONNET_46, source: "runtime" },
-		]);
+		expect(result.shadowed).toEqual([{ role: "smol", expected: undefined, actual: SONNET_46, source: "runtime" }]);
+		expect(session.effectiveModelRole("default")).toBe(OPUS);
 		expect({ ...settings.getModelRoles() }).toEqual({ default: SONNET, smol: SONNET_46 });
+		expect(session.model?.id).toBe("claude-opus-4-5");
 	});
 
-	it("reports roles a higher layer still decides instead of claiming a clean switch", async () => {
+	it("the preset shadows overlay and project layers alike; the global layer stays empty", async () => {
 		const settings = await projectSettings({
 			project: `modelRoles:\n  slow: ${SONNET_46}\n`,
 			overlay: `modelRoles:\n  default: ${SONNET}\n`,
@@ -241,12 +248,9 @@ describe("model presets", () => {
 		const result = await applyModelPreset(settings, session, "opus");
 
 		if (result.kind !== "switched") throw new Error(`expected switched, got ${result.kind}`);
-		expect(result.shadowed).toEqual([
-			{ role: "default", expected: OPUS, actual: SONNET, source: "overlay" },
-			{ role: "slow", expected: undefined, actual: SONNET_46, source: "project" },
-		]);
-		// The live model follows the effective default, which the overlay still decides.
-		expect(session.model?.id).toBe("claude-sonnet-4-5");
+		expect(result.shadowed).toEqual([{ role: "slow", expected: undefined, actual: SONNET_46, source: "project" }]);
+		// The live model follows the preset's default, which now outranks the overlay.
+		expect(session.model?.id).toBe("claude-opus-4-5");
 		// The shared config is never written; the global layer stays empty.
 		expect(settings.getGlobalModelRole("default")).toBeUndefined();
 	});
@@ -294,11 +298,16 @@ describe("model presets", () => {
 		settings.setModelRole("default", SONNET);
 		cfgModelPresets.setEntry(settings, "opus", { modelRoles: { default: OPUS } });
 		const session = createSession(settings);
-		vi.spyOn(session, "setModel").mockRejectedValue(new Error("metadata refresh failed"));
+		vi.spyOn(session.agent, "setModel").mockImplementation(() => {
+			throw new Error("metadata refresh failed");
+		});
 
 		const result = await applyModelPreset(settings, session, "opus");
 
 		expect(result).toMatchObject({ kind: "failed", reason: "metadata refresh failed" });
+		// A failed switch records nothing: the prior preset and model are retained.
+		expect(session.activePreset).toBeUndefined();
+		expect(session.model?.id).toBe("claude-sonnet-4-5");
 	});
 
 	it("saves only the named entry globally and never copies project presets", async () => {
@@ -449,7 +458,7 @@ describe("model presets", () => {
 		expect(order).toEqual(["first", "second"]);
 	});
 
-	it("applies the preset's thinking level live and names the layer that still owns the setting", async () => {
+	it("applies the preset's thinking level live, even when a base layer sets a different one", async () => {
 		const settings = await projectSettings({ project: "defaultThinkingLevel: high\n" });
 		cfgModelPresets.setEntry(settings, "cheap", {
 			modelRoles: { default: OPUS },
@@ -461,9 +470,9 @@ describe("model presets", () => {
 
 		if (result.kind !== "switched") throw new Error(`expected switched, got ${result.kind}`);
 		expect(session.thinkingLevel).toBe(Effort.Low);
-		expect(result.shadowedThinking).toEqual({ expected: Effort.Low, actual: Effort.High, source: "project" });
+		expect(result.shadowed).toEqual([]);
 		expect(formatModelPresetSwitch("cheap", result)).toBe(
-			'Switched to preset "cheap" (anthropic/claude-opus-4-5 · low); still set elsewhere: default: (unset) from default (preset: anthropic/claude-opus-4-5); defaultThinkingLevel: high from project config (preset: low)',
+			'Switched to preset "cheap" (anthropic/claude-opus-4-5 · low)',
 		);
 	});
 
@@ -496,5 +505,111 @@ describe("model presets", () => {
 		// The shared config is never written; only the session is affected.
 		expect(settings.getModelRole("default")).toBe(SONNET);
 		expect(session.model?.id).toBe("claude-opus-4-5");
+	});
+
+	it("an explicit session override beats the preset's own role and is reported as shadowed", async () => {
+		const settings = Settings.isolated();
+		settings.setModelRole("default", SONNET);
+		cfgModelPresets.setEntry(settings, "opus", { modelRoles: { default: OPUS, smol: SONNET_46 } });
+		const session = createSession(settings);
+		session.setSessionRoleOverride("default", SONNET);
+
+		const result = await applyModelPreset(settings, session, "opus");
+
+		expect(result.kind).toBe("switched");
+		if (result.kind !== "switched") throw new Error(`expected switched, got ${result.kind}`);
+		expect(result.shadowed).toEqual([{ role: "default", expected: OPUS, actual: SONNET, source: "session" }]);
+		expect(isCleanModelPresetSwitch(result)).toBe(false);
+		// The explicit pick wins the live model; the preset's other roles apply.
+		expect(session.model?.id).toBe("claude-sonnet-4-5");
+		expect(session.effectiveModelRole("smol")).toBe(SONNET_46);
+	});
+
+	it("consecutive switches do not leak the previous preset's roles", async () => {
+		const settings = Settings.isolated();
+		settings.setModelRole("default", SONNET);
+		cfgModelPresets.setEntry(settings, "a", { modelRoles: { default: OPUS, smol: SONNET_46 } });
+		cfgModelPresets.setEntry(settings, "b", { modelRoles: { default: SONNET_46 } });
+		const session = createSession(settings);
+
+		expect((await applyModelPreset(settings, session, "a")).kind).toBe("switched");
+		expect(session.effectiveModelRole("smol")).toBe(SONNET_46);
+
+		const result = await applyModelPreset(settings, session, "b");
+
+		expect(result.kind).toBe("switched");
+		if (result.kind !== "switched") throw new Error(`expected switched, got ${result.kind}`);
+		// `a`'s `smol` must not survive the switch to `b`.
+		expect(session.effectiveModelRole("smol")).toBeUndefined();
+		expect(session.effectiveModelRole("default")).toBe(SONNET_46);
+		expect(session.model?.id).toBe("claude-sonnet-4-6");
+	});
+
+	it("a clean switch reports no shadowed roles", async () => {
+		const settings = Settings.isolated();
+		settings.setModelRole("default", SONNET);
+		cfgModelPresets.setEntry(settings, "opus", { modelRoles: { default: OPUS } });
+		const session = createSession(settings);
+
+		const result = await applyModelPreset(settings, session, "opus");
+
+		expect(result.kind).toBe("switched");
+		if (result.kind !== "switched") throw new Error(`expected switched, got ${result.kind}`);
+		expect(result.shadowed).toEqual([]);
+		expect(isCleanModelPresetSwitch(result)).toBe(true);
+		expect(formatModelPresetSwitch("opus", result)).toBe('Switched to preset "opus" (anthropic/claude-opus-4-5)');
+	});
+
+	it("the next prompt streams on the switched model", async () => {
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		settings.setModelRole("default", SONNET);
+		cfgModelPresets.setEntry(settings, "focus", { modelRoles: { default: OPUS } });
+
+		const streamed: string[] = [];
+		const inner = createMockModel({ responses: [{ content: ["Done"] }] });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: bundled(SONNET), systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				streamed.push(model.id);
+				return inner.stream(model, context, options);
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		sessions.push(session);
+
+		expect((await applyModelPreset(settings, session, "focus")).kind).toBe("switched");
+		await session.prompt("hello");
+
+		expect(streamed).toEqual(["claude-opus-4-5"]);
+	});
+
+	it("saveModelPreset through the session's settings reaches the shared config", async () => {
+		const dir = TempDir.createSync("@pi-model-presets-persist-");
+		tempDirs.push(dir);
+		const agentDir = path.join(dir.path(), "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		const load = () => Settings.loadIsolated({ cwd: dir.path(), agentDir });
+		const settings = await load();
+		settings.setModelRole("default", SONNET);
+		await settings.flush();
+		const session = createSession(settings);
+
+		saveModelPreset(session.settings, "p2");
+		await session.settings.flush();
+
+		// An independent reload of the same scope sees the definition: the
+		// session's settings are the durable base, not a write-intercepting overlay.
+		const independent = await load();
+		expect(getModelPresetNames(independent)).toEqual(["p2"]);
+		expect(getModelPreset(independent, "p2")).toMatchObject({
+			kind: "found",
+			preset: { modelRoles: { default: SONNET } },
+		});
 	});
 });

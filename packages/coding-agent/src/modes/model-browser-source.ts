@@ -27,11 +27,17 @@ import {
  * @param sessionServiceTier - The live session's effective tier for a model
  *   (`/fast`, `/fast ultra`, `/slow`, resumed tiers). Omit only where no session
  *   exists; the configured `tier.*` settings stand in then.
+ * @param activePreset - The live session's active preset, for the hub's active
+ *   marker. Omit to fall back to `findActiveModelPreset(settings)`.
+ * @param effectiveModelRole - The live session's effective role selectors
+ *   (explicit override → active preset → base). Omit only where no session
+ *   exists; the base `modelRoles` stand in then.
  */
 export function createModelBrowserSource(
 	settings: Settings,
 	sessionServiceTier?: (model: Model) => ServiceTier | undefined,
 	activePreset?: () => string | undefined,
+	effectiveModelRole?: (role: string) => string | undefined,
 ): ModelHubSource {
 	return {
 		get revision() {
@@ -79,7 +85,7 @@ export function createModelBrowserSource(
 		get cycleOrder() {
 			return cfgCycleOrder.get(settings);
 		},
-		getModelRole: role => settings.getModelRole(role),
+		getModelRole: role => effectiveModelRole?.(role) ?? settings.getModelRole(role),
 		getProjectModelRole: role => settings.getProjectModelRole(role),
 		getGlobalModelRole: role => settings.getGlobalModelRole(role),
 		getModelRoleSource: role => settings.getModelRoleSource(role),
