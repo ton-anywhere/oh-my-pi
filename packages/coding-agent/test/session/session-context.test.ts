@@ -5,6 +5,7 @@ import * as snapcompact from "@oh-my-pi/snapcompact";
 import { type CompactionSummaryMessage, INTERRUPTED_THINKING_MESSAGE_TYPE } from "../../src/session/messages";
 import { buildSessionContext, type StrippedToolCallsMarker } from "../../src/session/session-context";
 import type { SessionEntry } from "../../src/session/session-entries";
+import { SessionManager } from "../../src/session/session-manager";
 
 const timestamp = "2026-07-09T00:00:00.000Z";
 
@@ -378,5 +379,17 @@ describe("buildSessionContext failed replay tails", () => {
 		);
 
 		expect(context.messages.map(message => message.role)).toEqual(["user", "assistant", "toolResult"]);
+	});
+});
+
+describe("buildSessionContext active preset", () => {
+	it("reconstructs activePreset from preset_change entries", () => {
+		const manager = SessionManager.inMemory();
+
+		expect(manager.buildSessionContext().activePreset).toBeUndefined();
+		manager.appendPresetChange("a");
+		manager.appendPresetChange("b");
+
+		expect(manager.buildSessionContext().activePreset).toBe("b");
 	});
 });

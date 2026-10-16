@@ -63,6 +63,7 @@ import {
 	type ModelUsageEntry,
 	lastSelfSelectedLeafId,
 	type NewSessionOptions,
+	type PresetChangeEntry,
 	type ResetBoundaryEntry,
 	type ServiceTierChangeEntry,
 	sessionEntryLeafId,
@@ -3515,6 +3516,16 @@ export class SessionManager {
 			model,
 			role,
 			resolvedModelIsFallback,
+		};
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
+	appendPresetChange(preset: string): string {
+		const entry: PresetChangeEntry = {
+			type: "preset_change",
+			...this.#freshEntryFields(),
+			preset,
 		};
 		this.#recordEntry(entry);
 		return entry.id;
