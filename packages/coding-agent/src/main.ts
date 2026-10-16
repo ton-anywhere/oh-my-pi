@@ -1335,6 +1335,9 @@ export async function buildSessionOptions(
 	if (parsed.serviceTier !== undefined) {
 		options.openAIServiceTier = serviceTierSettingToTier(parsed.serviceTier) ?? null;
 	}
+	if (parsed.preset !== undefined) {
+		options.preset = parsed.preset;
+	}
 	const cliDirs = parsed.addDir ?? [];
 	const settingsDirs = cfgWorkspaceAdditionalDirectories.get(activeSettings);
 	if (cliDirs.length > 0 || settingsDirs.length > 0) {

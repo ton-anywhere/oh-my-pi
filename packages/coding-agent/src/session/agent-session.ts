@@ -1631,7 +1631,7 @@ export class AgentSession implements SettingsScope {
 		this.sessionManager = config.sessionManager;
 		this.#settings = config.settings;
 		this.#baseSettings = config.settings;
-		this.#activePreset = undefined;
+		this.#activePreset = config.activePreset;
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
