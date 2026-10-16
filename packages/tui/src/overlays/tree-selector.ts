@@ -31,6 +31,7 @@ export type SessionTreeEntry = { id: string; parentId: string | null } & (
 	| { type: "compaction"; tokensBefore: number }
 	| { type: "branch_summary"; summary: string }
 	| { type: "model_change"; model: string }
+	| { type: "preset_change"; preset: string }
 	| { type: "model_usage"; purpose: string; role?: string; provider: string; model: string }
 	| { type: "thinking_level_change"; thinkingLevel?: string | null }
 	| { type: "custom"; customType: string }
