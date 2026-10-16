@@ -9,6 +9,8 @@ import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { cfgModelPresets, cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 
 import {
 	cfgIncludeWorkspaceTree,
@@ -33,6 +35,7 @@ describe("AgentSession live settings", () => {
 		authDir = path.join(os.tmpdir(), `pi-live-settings-auth-${Snowflake.next()}`);
 		fs.mkdirSync(authDir, { recursive: true });
 		modelRegistry = new ModelRegistry(await discoverAuthStorage(authDir));
+		modelRegistry.authStorage.keys.setRuntime("openai", "test-key");
 	});
 
 	afterEach(async () => {
@@ -49,7 +52,7 @@ describe("AgentSession live settings", () => {
 
 	const start = async (
 		settings: Settings,
-		extra?: Pick<CreateAgentSessionOptions, "systemPrompt">,
+		extra?: Pick<CreateAgentSessionOptions, "systemPrompt" | "preset">,
 	): Promise<AgentSession> => {
 		const cwd = path.join(os.tmpdir(), `pi-live-settings-${Snowflake.next()}`);
 		tempDirs.push(cwd);
@@ -148,5 +151,54 @@ describe("AgentSession live settings", () => {
 		expect(builds).toBe(1);
 		expect(live.systemPrompt.join("\n")).not.toBe(before);
 		expect(live.systemPrompt.join("\n")).toContain("live-settings-tree-marker/");
+	});
+
+	it("a live preset def edit re-resolves at the next model call", async () => {
+		const settings = Settings.isolated();
+		cfgModelRoles.setEntry(settings, "default", "openai/gpt-4o-mini");
+		cfgModelPresets.setEntry(settings, "p", { modelRoles: { default: "openai/gpt-4o" } });
+		const live = await start(settings, { preset: "p" });
+		expect(live.activePreset).toBe("p");
+		expect(live.resolveRoleModel("default")?.id).toBe("gpt-4o");
+
+		// Editing the active preset's def re-resolves the live default; no turn is in flight.
+		cfgModelPresets.setEntry(settings, "p", { modelRoles: { default: "openai/gpt-4.1" } });
+		await Promise.resolve();
+
+		expect(live.activePreset).toBe("p");
+		expect(live.resolveRoleModel("default")?.id).toBe("gpt-4.1");
+	});
+
+	it("a deleted active preset falls back to the base default, warns once, and retains the name", async () => {
+		const settings = Settings.isolated();
+		cfgModelRoles.setEntry(settings, "default", "openai/gpt-4o-mini");
+		cfgModelPresets.setEntry(settings, "p", { modelRoles: { default: "openai/gpt-4o" } });
+		const live = await start(settings, { preset: "p" });
+		expect(live.resolveRoleModel("default")?.id).toBe("gpt-4o");
+
+		const presetWarnings: Array<Extract<AgentSessionEvent, { type: "notice" }>> = [];
+		live.subscribe(event => {
+			if (event.type === "notice" && event.source === "model-preset") presetWarnings.push(event);
+		});
+
+		// Deleting the active preset's def falls back to the base default and keeps the name.
+		cfgModelPresets.setEntry(settings, "p", undefined);
+		await Promise.resolve();
+		expect(live.activePreset).toBe("p");
+		expect(live.resolveRoleModel("default")?.id).toBe("gpt-4o-mini");
+		expect(presetWarnings).toHaveLength(1);
+		expect(presetWarnings[0].level).toBe("warning");
+
+		// A further degenerate edit while the guard is armed stays silent (warn once per condition).
+		cfgModelPresets.setEntry(settings, "p", { modelRoles: { default: "openai/does-not-exist" } });
+		await Promise.resolve();
+		expect(presetWarnings).toHaveLength(1);
+
+		// Re-creating a valid, available def restores the preset without re-selecting it.
+		cfgModelPresets.setEntry(settings, "p", { modelRoles: { default: "openai/gpt-4o" } });
+		await Promise.resolve();
+		expect(live.activePreset).toBe("p");
+		expect(live.resolveRoleModel("default")?.id).toBe("gpt-4o");
+		expect(presetWarnings).toHaveLength(1);
 	});
 });
