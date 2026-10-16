@@ -303,13 +303,15 @@ export class ModelControls {
 		this.#host.sessionManager.appendModelChange(
 			`${targetModel.provider}/${targetModel.id}`,
 			options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
+			false,
+			selection === "explicit",
 		);
 		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
 
 		// Apply explicit thinking level if given; otherwise prefer the model's
 		// configured defaultLevel; otherwise re-clamp the current level (or auto).
 		if (thinkingLevel !== undefined) {
-			this.setThinkingLevel(thinkingLevel);
+			this.setThinkingLevel(thinkingLevel, false, selection === "explicit");
 		} else {
 			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
 		}
@@ -395,7 +397,11 @@ export class ModelControls {
 	 * settings. Shared with role cycling and the plan-approval model slider.
 	 */
 	async applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
-		await this.setModel(entry.model, entry.role);
+		const selector =
+			entry.explicitThinkingLevel && entry.thinkingLevel !== undefined
+				? `${formatModelStringWithRouting(entry.model)}:${entry.thinkingLevel}`
+				: undefined;
+		await this.setModel(entry.model, entry.role, selector ? { selector } : undefined);
 		if (entry.explicitThinkingLevel && entry.thinkingLevel !== undefined) {
 			this.setThinkingLevel(entry.thinkingLevel);
 		}
@@ -461,11 +467,11 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(next.model);
-		this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
+		this.#host.setSessionRoleOverride("default", formatModelStringWithRouting(next.model));
 		this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
 
 		// Apply the scoped model's configured thinking level, preserving auto.
-		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel);
+		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel, false, false);
 		await this.#host.syncAfterModelChange(previousEditMode);
 
 		return { model: next.model, thinkingLevel: this.thinkingLevel, isScoped: true };
@@ -488,11 +494,11 @@ export class ModelControls {
 		if (!apiKey) {
 			throw new Error(`No API key for ${nextModel.provider}/${nextModel.id}`);
 		}
-
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(nextModel);
-		this.#host.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
+
+		this.#host.setSessionRoleOverride("default", formatModelStringWithRouting(nextModel));
 		this.#host.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
 		// Re-apply the current thinking level (or auto) for the newly selected model
 		this.#reapplyThinkingLevel();
@@ -527,7 +533,11 @@ export class ModelControls {
 	 * giving external readers an authoritative selection receipt before the next
 	 * user turn. Later classifications persist only changed concrete resolutions.
 	 */
-	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
+	setThinkingLevel(
+		level: ConfiguredThinkingLevel | undefined,
+		persist: boolean = false,
+		explicit: boolean = true,
+	): void {
 		if (level === AUTO_THINKING) {
 			const provisional = clampThinkingLevelToCeiling(
 				this.#model,
@@ -548,7 +558,7 @@ export class ModelControls {
 			}
 			const isChanging = !wasAuto || previousLevel !== provisional;
 			if (isChanging) {
-				this.#host.sessionManager.appendThinkingLevelChange(provisional, AUTO_THINKING);
+				this.#host.sessionManager.appendThinkingLevelChange(provisional, AUTO_THINKING, explicit);
 				this.#host.emit({ type: "thinking_level_changed", thinkingLevel: provisional, configured: AUTO_THINKING });
 			}
 			return;
@@ -571,21 +581,24 @@ export class ModelControls {
 
 		if (isChanging) {
 			this.#host.clearInheritedProviderPromptCacheKey();
-			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel);
+			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel, explicit);
 			if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
 				cfgDefaultThinkingLevel.set(this.#host.settings, effectiveLevel);
 			}
 			this.#host.emit({ type: "thinking_level_changed", thinkingLevel: effectiveLevel });
 		}
 	}
-
 	/**
 	 * Re-apply the active thinking selection after a model change. Preserves `auto`
 	 * (re-clamping the provisional level to the new model); otherwise re-applies the
 	 * preferred default or the current effective level.
 	 */
 	#reapplyThinkingLevel(preferredDefault?: ThinkingLevel): void {
-		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : (preferredDefault ?? this.#thinkingLevel));
+		this.setThinkingLevel(
+			this.#autoThinking ? AUTO_THINKING : (preferredDefault ?? this.#thinkingLevel),
+			false,
+			false,
+		);
 	}
 
 	/** All selectable effort selectors for the active model, in cycle order. */

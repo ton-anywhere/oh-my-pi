@@ -241,7 +241,6 @@ import {
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
 	parseConfiguredThinkingLevel,
-	parseThinkingLevel,
 	resolveProvisionalAutoLevel,
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
@@ -2092,9 +2091,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const pickInitialThinkingLevel = (selectedModel: Model | undefined): ConfiguredThinkingLevel | undefined => {
 		let level = options.thinkingLevel;
 		if (level === undefined && hasExistingSession && hasThinkingEntry) {
-			level =
-				parseConfiguredThinkingLevel(existingSession.configuredThinkingLevel) ??
-				parseThinkingLevel(existingSession.thinkingLevel);
+			level = parseConfiguredThinkingLevel(existingSession.configuredThinkingLevel);
 		}
 		if (level === undefined && !hasThinkingEntry && restoredSessionThinkingLevel !== undefined) {
 			level = restoredSessionThinkingLevel;
@@ -4514,15 +4511,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
 				);
 			}
+			if (options.thinkingLevel !== undefined) {
+				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, thinkingLevel, true);
+			}
 		} else {
 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
 			if (model) {
 				sessionManager.appendModelChange(`${model.provider}/${model.id}`);
 			}
-			if (!autoThinking) {
-				// Do not write the `auto` selector before the first turn resolves; auto
-				// classification persists its concrete effort once a real user turn runs.
-				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel);
+			if (!autoThinking || options.thinkingLevel !== undefined) {
+				// Initial model/preset defaults are automatic; an explicit CLI
+				// selector is marked so it wins on the next resume.
+				sessionManager.appendThinkingLevelChange(
+					effectiveThinkingLevel,
+					autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
+					options.thinkingLevel !== undefined,
+				);
 			}
 			if (persistInitialServiceTier || Object.keys(initialServiceTierByFamily).length > 0) {
 				sessionManager.appendServiceTierChange(

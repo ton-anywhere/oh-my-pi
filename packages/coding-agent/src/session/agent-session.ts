@@ -213,7 +213,6 @@ import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
 import { toolReadsSkillUris } from "../system-prompt";
 import {
-	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	parseConfiguredThinkingLevel,
 	shouldDisableReasoning,
@@ -1804,7 +1803,7 @@ export class AgentSession implements SettingsScope {
 			textOutputCommitted: () => this.#textOutputCommitted,
 			thinkingLevel: () => this.thinkingLevel,
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
-			setThinkingLevel: level => this.#models.setThinkingLevel(level),
+			setThinkingLevel: level => this.#models.setThinkingLevel(level, false, false),
 			thinkingLevelCeiling: () => this.#models.thinkingLevelCeiling,
 			isDisposed: () => this.#isDisposed,
 			isStreaming: () => this.isStreaming,
@@ -10070,7 +10069,7 @@ export class AgentSession implements SettingsScope {
 		await this.#setModelWithProviderSessionReset(model);
 		// `:inherit` means "no explicit level": leave what the model switch applied.
 		if (thinkingLevel !== undefined && thinkingLevel !== "inherit") {
-			this.setThinkingLevel(thinkingLevel);
+			this.setThinkingLevel(thinkingLevel, false, false);
 		}
 		this.#activePreset = preset;
 		this.#presetReResolveWarned = false;
@@ -10095,6 +10094,23 @@ export class AgentSession implements SettingsScope {
 		return this.settings.getModelRole(role);
 	}
 
+	/** Return all currently effective role selectors for preset saving. */
+	effectiveModelRoles(): Record<string, string> {
+		const lookup = this.#activePreset ? getModelPreset(this.settings, this.#activePreset) : undefined;
+		const preset = lookup?.kind === "found" ? lookup.preset : undefined;
+		const roleIds = new Set([
+			...Object.keys(this.settings.getModelRoles()),
+			...(preset ? Object.keys(preset.modelRoles) : []),
+			...Object.keys(this.#sessionRoleOverrides),
+		]);
+		const roles: Record<string, string> = {};
+		for (const role of roleIds) {
+			const selector = this.effectiveModelRole(role);
+			if (selector !== undefined) roles[role] = selector;
+		}
+		return roles;
+	}
+
 	/** The effective default thinking level: the active preset's, when it records one, else the base's. */
 	effectiveDefaultThinkingLevel(): ConfiguredThinkingLevel | undefined {
 		if (this.#activePreset) {
@@ -10110,7 +10126,7 @@ export class AgentSession implements SettingsScope {
 		return scoped.length > 0 ? scoped.map(entry => entry.model) : this.getAvailableModels();
 	}
 
-	#hasExplicitThinkingOverride(model: Model): boolean {
+	#hasExplicitThinkingOverride(): boolean {
 		let latestPresetChange = -1;
 		let latestThinkingChange = -1;
 		const branch = this.sessionManager.getBranch();
@@ -10120,15 +10136,7 @@ export class AgentSession implements SettingsScope {
 		}
 		if (latestThinkingChange <= latestPresetChange) return false;
 		const thinkingEntry = branch[latestThinkingChange];
-		if (!thinkingEntry || thinkingEntry.type !== "thinking_level_change") return false;
-		const configured = parseConfiguredThinkingLevel(thinkingEntry.configured ?? thinkingEntry.thinkingLevel);
-		const preset = this.#activePreset ? getModelPreset(this.settings, this.#activePreset) : undefined;
-		if (preset?.kind === "found" && preset.preset.defaultThinkingLevel !== undefined) {
-			return configured !== preset.preset.defaultThinkingLevel;
-		}
-		const automaticDefault =
-			model.thinking?.defaultLevel ?? parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings));
-		return configured !== automaticDefault;
+		return thinkingEntry?.type === "thinking_level_change" && thinkingEntry.explicit === true;
 	}
 
 	#resolvePresetThinkingLevel(
@@ -10136,7 +10144,7 @@ export class AgentSession implements SettingsScope {
 		model: Model,
 		fallback: ConfiguredThinkingLevel | undefined,
 	): ConfiguredThinkingLevel | undefined {
-		if (this.#hasExplicitThinkingOverride(model)) return fallback;
+		if (this.#hasExplicitThinkingOverride()) return fallback;
 		if (
 			resolved?.explicitThinkingLevel &&
 			resolved.thinkingLevel !== undefined &&
@@ -10170,7 +10178,7 @@ export class AgentSession implements SettingsScope {
 		const thinkingLevel = this.#resolvePresetThinkingLevel(resolved, target, this.configuredThinkingLevel());
 		const modelChanged = !this.model || !modelsAreEqual(this.model, target);
 		if (modelChanged) await this.#setModelWithProviderSessionReset(target);
-		if (this.configuredThinkingLevel() !== thinkingLevel) this.setThinkingLevel(thinkingLevel);
+		if (this.configuredThinkingLevel() !== thinkingLevel) this.setThinkingLevel(thinkingLevel, false, false);
 	}
 
 	/** Record an explicit user role selector (tier 1) and journal it. */
@@ -10232,7 +10240,7 @@ export class AgentSession implements SettingsScope {
 			if (!modelChanged && !thinkingChanged) return;
 			void (async () => {
 				if (modelChanged) await this.#setModelWithProviderSessionReset(target);
-				if (this.configuredThinkingLevel() !== thinkingLevel) this.setThinkingLevel(thinkingLevel);
+				if (this.configuredThinkingLevel() !== thinkingLevel) this.setThinkingLevel(thinkingLevel, false, false);
 			})();
 			return;
 		}
@@ -10286,9 +10294,13 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** Selects the session thinking level and optionally persists it as the default. */
-	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
+	setThinkingLevel(
+		level: ConfiguredThinkingLevel | undefined,
+		persist: boolean = false,
+		explicit: boolean = true,
+	): void {
 		this.#prewalk.releaseHandoff();
-		this.#models.setThinkingLevel(level, persist);
+		this.#models.setThinkingLevel(level, persist, explicit);
 	}
 
 	/** Advances through the thinking selectors supported by the active model. */
@@ -11730,7 +11742,6 @@ export class AgentSession implements SettingsScope {
 				}
 			}
 
-			const hasThinkingEntry = this.sessionManager.getBranch().some(entry => entry.type === "thinking_level_change");
 			const hasServiceTierEntry = this.sessionManager
 				.getBranch()
 				.some(entry => entry.type === "service_tier_change");
@@ -11740,25 +11751,14 @@ export class AgentSession implements SettingsScope {
 				cfgTierAnthropic.get(this.settings),
 				cfgTierGoogle.get(this.settings),
 			);
-			// Restore the thinking selector. Each change persists the configured
-			// selector (`auto` or a concrete level), so prefer it: an `auto` session
-			// resumes in auto mode (reclassifying the next turn) instead of freezing at
-			// the last resolved level. Entries written before the `configured` field
-			// existed fall back to the concrete level (legacy pin-on-resume behavior).
-			// With no thinking entry, fall back to the global default so fresh sessions
-			// still classify their first turn.
-			const restoredConfigured = sessionContext.configuredThinkingLevel;
-			const restoredTargetThinking =
-				parseConfiguredThinkingLevel(restoredConfigured) ??
-				parseConfiguredThinkingLevel(sessionContext.thinkingLevel);
+			// Restore only an explicitly selected thinking receipt. Automatic
+			// receipts (initial model, preset switch, and classification) must
+			// not freeze a preset's newly edited default on resume.
+			const restoredConfigured = parseConfiguredThinkingLevel(sessionContext.configuredThinkingLevel);
 			const restoredThinkingLevel: ConfiguredThinkingLevel | undefined =
 				this.#activePreset && model
-					? this.#resolvePresetThinkingLevel(targetResolution, model, restoredTargetThinking)
-					: hasThinkingEntry || (defaultThinkingLevel === AUTO_THINKING && sessionContext.thinkingLevel !== "off")
-						? restoredConfigured === AUTO_THINKING
-							? AUTO_THINKING
-							: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
-						: defaultThinkingLevel;
+					? this.#resolvePresetThinkingLevel(targetResolution, model, restoredConfigured)
+					: (restoredConfigured ?? model?.thinking?.defaultLevel ?? defaultThinkingLevel);
 			this.#models.restoreThinkingLevel(restoredThinkingLevel);
 			this.#models.restoreServiceTiers(
 				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,

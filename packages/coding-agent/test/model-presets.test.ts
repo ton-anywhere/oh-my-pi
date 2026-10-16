@@ -458,7 +458,7 @@ describe("model presets", () => {
 		expect(order).toEqual(["first", "second"]);
 	});
 
-	it("applies the preset's thinking level live, even when a base layer sets a different one", async () => {
+	it("reports a shadowed base thinking level while applying the preset level live", async () => {
 		const settings = await projectSettings({ project: "defaultThinkingLevel: high\n" });
 		cfgModelPresets.setEntry(settings, "cheap", {
 			modelRoles: { default: OPUS },
@@ -471,9 +471,13 @@ describe("model presets", () => {
 		if (result.kind !== "switched") throw new Error(`expected switched, got ${result.kind}`);
 		expect(session.thinkingLevel).toBe(Effort.Low);
 		expect(result.shadowed).toEqual([]);
-		expect(formatModelPresetSwitch("cheap", result)).toBe(
-			'Switched to preset "cheap" (anthropic/claude-opus-4-5 · low)',
-		);
+		expect(result.shadowedThinking).toEqual({
+			expected: Effort.Low,
+			actual: Effort.High,
+			source: "project",
+		});
+		expect(isCleanModelPresetSwitch(result)).toBe(false);
+		expect(formatModelPresetSwitch("cheap", result)).toContain("defaultThinkingLevel");
 	});
 
 	it("does not list a preset a --config overlay tombstones, but keeps one a project null falls through", async () => {
@@ -545,7 +549,7 @@ describe("model presets", () => {
 		expect(session.model?.id).toBe("claude-sonnet-4-6");
 	});
 
-	it("a clean switch reports no shadowed roles", async () => {
+	it("a clean switch reports no shadowed roles or thinking", async () => {
 		const settings = Settings.isolated();
 		settings.setModelRole("default", SONNET);
 		cfgModelPresets.setEntry(settings, "opus", { modelRoles: { default: OPUS } });
@@ -556,6 +560,7 @@ describe("model presets", () => {
 		expect(result.kind).toBe("switched");
 		if (result.kind !== "switched") throw new Error(`expected switched, got ${result.kind}`);
 		expect(result.shadowed).toEqual([]);
+		expect(result.shadowedThinking).toBeUndefined();
 		expect(isCleanModelPresetSwitch(result)).toBe(true);
 		expect(formatModelPresetSwitch("opus", result)).toBe('Switched to preset "opus" (anthropic/claude-opus-4-5)');
 	});
@@ -727,6 +732,104 @@ describe("model presets", () => {
 		expect(getModelPreset(independent, "p2")).toMatchObject({
 			kind: "found",
 			preset: { modelRoles: { default: SONNET } },
+		});
+	});
+
+	it("preserves a cycled model as an explicit override when resuming an active preset", async () => {
+		const settings = Settings.isolated();
+		settings.setModelRole("default", SONNET);
+		cfgModelPresets.setEntry(settings, "focus", { modelRoles: { default: SONNET } });
+		const dir = TempDir.createSync("@pi-model-presets-cycle-resume-");
+		tempDirs.push(dir);
+		const sessionManager = SessionManager.create(dir.path(), dir.path());
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: { model: bundled(SONNET), systemPrompt: ["Test"], tools: [], messages: [] },
+			}),
+			sessionManager,
+			settings,
+			modelRegistry,
+			scopedModels: [{ model: bundled(SONNET) }, { model: bundled(OPUS) }],
+		});
+		sessions.push(session);
+
+		expect((await applyModelPreset(settings, session, "focus")).kind).toBe("switched");
+		const cycled = await session.cycleModel();
+		expect(cycled?.model.id).toBe("claude-opus-4-5");
+		expect(sessionManager.getEntries().at(-1)).toMatchObject({
+			type: "model_change",
+			role: "default",
+			explicit: true,
+			model: OPUS,
+		});
+		sessionManager.appendMessage({ role: "user", content: "cycle", timestamp: Date.now() });
+
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a session file");
+		await sessionManager.ensureOnDisk();
+		await session.switchSession(sessionFile);
+		expect(session.model?.id).toBe("claude-opus-4-5");
+		expect(session.effectiveModelRole("default")).toBe(OPUS);
+	});
+
+	it("reapplies an edited preset thinking default when resuming", async () => {
+		const settings = Settings.isolated();
+		settings.setModelRole("default", SONNET);
+		cfgModelPresets.setEntry(settings, "focus", {
+			modelRoles: { default: SONNET },
+			defaultThinkingLevel: Effort.Low,
+		});
+		const dir = TempDir.createSync("@pi-model-presets-thinking-resume-");
+		tempDirs.push(dir);
+		const sessionManager = SessionManager.create(dir.path(), dir.path());
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: bundled(SONNET),
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+					thinkingLevel: Effort.High,
+				},
+			}),
+			sessionManager,
+			settings,
+			modelRegistry,
+		});
+		sessions.push(session);
+
+		expect((await applyModelPreset(settings, session, "focus")).kind).toBe("switched");
+		expect(session.thinkingLevel).toBe(Effort.Low);
+		cfgModelPresets.setEntry(settings, "focus", {
+			modelRoles: { default: SONNET },
+			defaultThinkingLevel: Effort.High,
+		});
+		sessionManager.appendMessage({ role: "user", content: "thinking", timestamp: Date.now() });
+
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a session file");
+		await sessionManager.ensureOnDisk();
+		await session.switchSession(sessionFile);
+
+		expect(session.thinkingLevel).toBe(Effort.High);
+	});
+
+	it("saves effective preset roles and thinking instead of the durable base", async () => {
+		const settings = Settings.isolated();
+		settings.setModelRole("default", SONNET);
+		cfgDefaultThinkingLevel.set(settings, Effort.High);
+		cfgModelPresets.setEntry(settings, "focus", {
+			modelRoles: { default: OPUS },
+			defaultThinkingLevel: Effort.Low,
+		});
+		const session = createSession(settings);
+
+		expect((await applyModelPreset(settings, session, "focus")).kind).toBe("switched");
+		saveModelPreset(settings, "saved", session.effectiveModelRoles(), session.effectiveDefaultThinkingLevel());
+
+		expect(getModelPreset(settings, "saved")).toMatchObject({
+			kind: "found",
+			preset: { modelRoles: { default: OPUS }, defaultThinkingLevel: Effort.Low },
 		});
 	});
 });
