@@ -7,6 +7,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	acquireModelRoleMutation,
 	applyModelPreset,
+	buildPresetOverlay,
 	deleteModelPreset,
 	getModelPreset,
 	getModelPresetNames,
@@ -90,6 +91,41 @@ describe("model presets", () => {
 			overrides: options.storage ? { modelRoleStorage: options.storage } : {},
 		});
 	}
+
+	it("buildPresetOverlay resolves roles by precedence", () => {
+		const base = Settings.isolated();
+		base.setModelRole("default", "b/d");
+		base.setModelRole("smol", "b/s");
+		cfgModelPresets.setEntry(base, "snap", { modelRoles: { default: "p/d", slow: "p/slow" } });
+
+		const overlay = buildPresetOverlay(base, "snap", { default: "o/d" });
+
+		expect(overlay.getModelRole("default")).toBe("o/d"); // per-role override wins
+		expect(overlay.getModelRole("slow")).toBe("p/slow"); // preset fills a base-absent role
+		expect(overlay.getModelRole("smol")).toBe("b/s"); // base fills a role the preset leaves out
+	});
+
+	it("buildPresetOverlay takes the preset's defaultThinkingLevel when it records one", () => {
+		const base = Settings.isolated();
+		base.setModelRole("default", "b/d");
+		cfgDefaultThinkingLevel.set(base, Effort.High);
+		cfgModelPresets.setEntry(base, "snap", { modelRoles: { default: "p/d" }, defaultThinkingLevel: Effort.Low });
+
+		const overlay = buildPresetOverlay(base, "snap", {});
+
+		expect(overlay.getModelRole("default")).toBe("p/d");
+		expect(cfgDefaultThinkingLevel.get(overlay)).toBe(Effort.Low);
+	});
+
+	it("buildPresetOverlay passes through base roles when no preset is active", () => {
+		const base = Settings.isolated();
+		base.setModelRole("default", "b/d");
+		base.setModelRole("smol", "b/s");
+
+		const overlay = buildPresetOverlay(base, undefined, {});
+
+		expect({ ...overlay.getModelRoles() }).toEqual({ default: "b/d", smol: "b/s" });
+	});
 
 	it("switching replaces the whole role record and applies the preset's thinking level live", async () => {
 		const settings = Settings.isolated();
