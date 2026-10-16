@@ -4,11 +4,11 @@
  *
  * Presets persist to the global config (`modelPresets.<name>`); a project config
  * may also define presets, which are listed and applied but never copied into
- * the global file. Applying a preset writes roles the way the model hub does:
- * into the scope selected by `modelRoleStorage`, replacing `--model`/env runtime
- * role overrides like hub edits do. Roles still decided by another layer (a
- * `--config` overlay, a project config in global mode, or the global config in
- * project mode) are reported back instead of being silently kept.
+ * the global file. Switching a preset records it as per-session state and
+ * re-resolves the session's roles from the definition — the shared config is
+ * never written, so concurrent sessions on different presets do not clobber
+ * each other. Roles still decided by a higher layer (a `--config` overlay or a
+ * runtime `--model` override) win over the preset and are reported back.
  */
 import type { Model } from "@oh-my-pi/pi-ai";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
@@ -89,6 +89,16 @@ export function buildPresetOverlay(
 		overrides.defaultThinkingLevel = lookup.preset.defaultThinkingLevel;
 	}
 	return base.overlay(overrides);
+}
+
+/** Roles decided by a layer above the base: runtime `--model`/env overrides and the `--config` overlay. */
+export function roleOverridesAboveBase(settings: Settings): Record<string, string> {
+	const overrides: Record<string, string> = {};
+	for (const [role, value] of Object.entries(settings.getModelRoles())) {
+		const provenance = settings.getModelRoleProvenance(role);
+		if (value !== undefined && (provenance === "runtime" || provenance === "overlay")) overrides[role] = value;
+	}
+	return overrides;
 }
 
 /** Saved preset names, sorted; names a `--config`/runtime `null` tombstone hides are left out. */
@@ -234,7 +244,7 @@ export type ModelPresetSwitchResult =
 
 export type ModelPresetSession = Pick<
 	AgentSession,
-	"setModel" | "setThinkingLevel" | "getAvailableModels" | "scopedModels" | "modelRegistry"
+	"setModel" | "setThinkingLevel" | "getAvailableModels" | "scopedModels" | "modelRegistry" | "setActivePreset"
 >;
 
 function presetCandidates(session: ModelPresetSession): Model[] {
@@ -284,37 +294,6 @@ function resolveLiveDefault(
 	};
 }
 
-/** Write the preset's roles into the model hub's storage scope, clearing roles it leaves out. */
-function writePresetRoles(settings: Settings, preset: ModelPreset): void {
-	const project = cfgModelRoleStorage.get(settings) === "project";
-	const roles = new Set([...Object.keys(settings.getModelRoles()), ...Object.keys(preset.modelRoles)]);
-	if (project) {
-		for (const role of roles) {
-			const value = Object.hasOwn(preset.modelRoles, role) ? preset.modelRoles[role] : undefined;
-			if (value !== undefined) settings.setProjectModelRole(role, value);
-			else if (settings.getProjectModelRole(role) || settings.getModelRoleProvenance(role) === "runtime") {
-				settings.clearProjectModelRole(role);
-			}
-		}
-	} else {
-		for (const role of roles) {
-			if (Object.hasOwn(preset.modelRoles, role)) {
-				settings.setModelRole(role, preset.modelRoles[role]);
-				continue;
-			}
-			// Skip roles neither the global layer nor a runtime override owns:
-			// deleting them would dirty the save queue without changing anything.
-			if (settings.getGlobalModelRole(role) === undefined && settings.getModelRoleProvenance(role) !== "runtime") {
-				continue;
-			}
-			settings.setModelRole(role, undefined);
-		}
-	}
-	if (preset.defaultThinkingLevel !== undefined) {
-		cfgDefaultThinkingLevel.set(settings, preset.defaultThinkingLevel);
-	}
-}
-
 function shadowedRoles(settings: Settings, preset: ModelPreset): ModelPresetShadowedRole[] {
 	const effective = settings.getModelRoles();
 	const roles = new Set([...Object.keys(effective), ...Object.keys(preset.modelRoles)]);
@@ -338,12 +317,15 @@ function shadowedThinking(settings: Settings, preset: ModelPreset): ModelPresetS
 }
 
 /**
- * Apply preset `name`: persist its roles and thinking level, then switch the
- * live session to the resulting default model and thinking level.
+ * Apply preset `name`: switch the live session to the preset's default model and
+ * thinking level, then record the preset on the session. The shared config is
+ * never written — the active preset is per-session state, so concurrent sessions
+ * on different presets do not clobber each other.
  *
- * The preset's own default is checked before anything is written, so a preset
- * whose model is gone leaves settings untouched. A live switch that still fails
- * afterwards is reported as `failed`, never as a completed switch.
+ * The preset's own default is validated before the live switch, so a preset whose
+ * model is gone is refused as `unavailable`. A live switch that still fails
+ * afterwards is reported as `failed` and never records the preset, so the prior
+ * `activePreset` is retained.
  */
 export async function applyModelPreset(
 	settings: Settings,
@@ -391,21 +373,27 @@ async function applyModelPresetLocked(
 		return { kind: "unavailable", reason: "no model with configured credentials is available" };
 	}
 
-	writePresetRoles(settings, preset);
+	// The session's effective settings: the base overlaid with the preset's roles.
+	// The shared config is never written; a live switch that fails below retains
+	// the prior preset because the journal lands only after it succeeds.
+	const overlay = buildPresetOverlay(settings, name, roleOverridesAboveBase(settings));
 	const shadowed = shadowedRoles(settings, preset);
 	const thinkingShadow = shadowedThinking(settings, preset);
 
-	const live = resolveLiveDefault(settings, session, candidates, preset);
+	const live = resolveLiveDefault(overlay, session, candidates, preset);
 	if (typeof live === "string") return { kind: "failed", reason: live, shadowed };
 	try {
 		await session.setModel(live.model, "default", { persist: false });
+		// setModel re-applies the model's default or keeps the current level; the preset decides instead.
+		// `:inherit` means "no explicit level": leave what setModel applied rather than clearing the session level.
+		if (live.thinkingLevel !== undefined && live.thinkingLevel !== ThinkingLevel.Inherit) {
+			session.setThinkingLevel(live.thinkingLevel);
+		}
+		// Only a completed live switch records the preset on the session; a failed
+		// setModel above leaves the prior activePreset intact.
+		await session.setActivePreset(name);
 	} catch (error) {
 		return { kind: "failed", reason: errorMessage(error), shadowed };
-	}
-	// setModel re-applies the model's default or keeps the current level; the preset decides instead.
-	// `:inherit` means "no explicit level": leave what setModel applied rather than clearing the session level.
-	if (live.thinkingLevel !== undefined && live.thinkingLevel !== ThinkingLevel.Inherit) {
-		session.setThinkingLevel(live.thinkingLevel);
 	}
 	return {
 		kind: "switched",

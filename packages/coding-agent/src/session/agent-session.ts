@@ -129,6 +129,7 @@ import {
 	resolveSessionModelSelector,
 	sessionModelDiscoveryProviders,
 } from "../config/model-resolver";
+import { buildPresetOverlay, roleOverridesAboveBase } from "../config/model-presets";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
 import { combine, type SettingsScope } from "../config/registry";
@@ -835,7 +836,19 @@ function todoRetryMatches(failed: Record<string, unknown>, retry: Record<string,
 export class AgentSession implements SettingsScope {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
-	readonly settings: Settings;
+	#settings: Settings;
+	/** The base (non-overlay) settings; the active preset's overlay is rebuilt on top of it. */
+	readonly #baseSettings: Settings;
+	/** The preset this session is on, from its latest `preset_change`; `undefined` for a bare session. */
+	#activePreset: string | undefined;
+	/** The session's effective settings: the base overlaid with the active preset's roles. */
+	get settings(): Settings {
+		return this.#settings;
+	}
+	/** The preset this session is on, or `undefined` for a bare session. */
+	get activePreset(): string | undefined {
+		return this.#activePreset;
+	}
 	/** Session-start policy, independent of the selected project memory backend. */
 	readonly memoryEnabled: boolean;
 	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
@@ -1748,7 +1761,9 @@ export class AgentSession implements SettingsScope {
 				isHiddenUserCompanion(previous) && (isHiddenUserCompanion(next) || isUserQueuedMessage(next)),
 		);
 		this.sessionManager = config.sessionManager;
-		this.settings = config.settings;
+		this.#settings = config.settings;
+		this.#baseSettings = config.settings;
+		this.#activePreset = undefined;
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
@@ -10457,6 +10472,18 @@ export class AgentSession implements SettingsScope {
 		},
 	): Promise<{ switched: boolean }> {
 		return this.#models.setModel(model, role, options);
+	}
+
+	/**
+	 * Record `preset` as this session's active preset and rebuild the session's
+	 * settings overlay on top of the base. Called only after the live model
+	 * switch succeeds, so a failed switch retains the prior preset (a failed
+	 * switch is never a completed one). The shared config is never written.
+	 */
+	async setActivePreset(preset: string): Promise<void> {
+		this.sessionManager.appendPresetChange(preset);
+		this.#activePreset = preset;
+		this.#settings = buildPresetOverlay(this.#baseSettings, preset, roleOverridesAboveBase(this.#baseSettings));
 	}
 
 	/** Selects a model for this session without updating persisted model settings. */
