@@ -417,6 +417,24 @@ function parseSessionListHeader(
 	return undefined;
 }
 
+function hasCompleteSessionHeader(content: string): boolean {
+	let nonEmptyLines = 0;
+	let lineStart = 0;
+	while (lineStart < content.length) {
+		const newlineIndex = content.indexOf("\n", lineStart);
+		if (newlineIndex === -1) return false;
+		const line = content.slice(lineStart, newlineIndex).trim();
+		lineStart = newlineIndex + 1;
+		if (!line) continue;
+		if (nonEmptyLines === 0 && extractStringProperty(line, "type") === "title") {
+			nonEmptyLines = 1;
+			continue;
+		}
+		return true;
+	}
+	return false;
+}
+
 function getSessionListWorkerCount(fileCount: number): number {
 	if (fileCount <= SESSION_LIST_PARALLEL_THRESHOLD) return 1;
 	return Math.min(
@@ -427,8 +445,9 @@ function getSessionListWorkerCount(fileCount: number): number {
 }
 
 /**
- * Scan a single session file into a {@link SessionInfo}. Always reads the 4 KB
- * header/first-message prefix; only reads the 32 KB tail window (and derives
+ * Scan a single session file into a {@link SessionInfo}. Starts with a 4 KB
+ * header/first-message prefix and expands it until the complete first JSONL
+ * header is available; only reads the 32 KB tail window (and derives
  * {@link SessionStatus}) when `withStatus` is set — the recent/most-recent
  * lookups skip it.
  */
@@ -454,11 +473,18 @@ async function scanSessionFile(
 		return cached.info ? { ...cached.info } : undefined;
 	}
 	try {
-		const [content, suffix] = await storage.readTextSlices(
-			file,
-			SESSION_LIST_PREFIX_BYTES,
-			withStatus ? SESSION_LIST_SUFFIX_BYTES : 0,
-		);
+		let prefixBytes = Math.min(SESSION_LIST_PREFIX_BYTES, stat.size);
+		let content = "";
+		let suffix = "";
+		while (true) {
+			[content, suffix] = await storage.readTextSlices(
+				file,
+				prefixBytes,
+				withStatus ? SESSION_LIST_SUFFIX_BYTES : 0,
+			);
+			if (hasCompleteSessionHeader(content) || prefixBytes >= stat.size) break;
+			prefixBytes = Math.min(stat.size, prefixBytes * 2);
+		}
 		const { size, mtime } = stat;
 		const entries = parseJsonlLenient<Record<string, unknown>>(content);
 		const header = parseSessionListHeader(content, entries);
