@@ -4,6 +4,7 @@ import type { Api, AuthStorage, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { cfgModelPresets } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -208,5 +209,29 @@ describe("buildSessionOptions --models scope selection", () => {
 		expect(options.model?.id).toBe("a");
 		expect(options.rebindModelAfterDiscovery).toBe(true);
 		expect(options.scopedModels?.map(entry => entry.model.id)).toEqual(["a"]);
+	});
+
+	it("selects the preset default from inside an explicit model scope", async () => {
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "prov/a");
+		cfgModelPresets.setEntry(settings, "p", {
+			modelRoles: { default: "@slow", slow: "prov/b" },
+		});
+		const scoped = await resolveModelScope(
+			["prov/a", "prov/b"],
+			{ getAvailable: () => [model("a"), model("b")] },
+			undefined,
+			settings,
+		);
+
+		const options = await buildSessionOptions(
+			parseArgs(["--preset", "p", "--models", "prov/a,prov/b"]),
+			scoped,
+			SessionManager.inMemory(),
+			registry(),
+			settings,
+		);
+
+		expect(options.model?.id).toBe("b");
 	});
 });

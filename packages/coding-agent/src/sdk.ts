@@ -1981,6 +1981,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		return settings.getModelRole(role);
 	};
+	const effectiveRoleLookup = { getModelRole: effectiveRole };
 
 	const deferredModelPatterns = Array.isArray(options.modelPattern)
 		? options.modelPattern.map(pattern => pattern.trim()).filter(Boolean)
@@ -1990,9 +1991,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const hasExplicitModel = options.model !== undefined || deferredModelPatterns.length > 0;
 	const modelMatchPreferences = getModelMatchPreferences(settings);
 	const defaultRoleValue = effectiveRole("default");
+	const configuredDefaultRoleValue = existingSession.activePreset
+		? defaultRoleValue
+		: settings.getModelRole("default");
+	const configuredDefaultRoleLookup = existingSession.activePreset ? effectiveRoleLookup : settings;
 	let explicitDefaultProviders: Set<string> | undefined;
 	if ((cfgEnabledModels.get(settings)?.length ?? 0) === 0) {
-		const patterns = resolveConfiguredModelPatterns(defaultRoleValue, settings);
+		const patterns = resolveConfiguredModelPatterns(defaultRoleValue, configuredDefaultRoleLookup);
 		if (patterns && patterns.length > 0) {
 			const providers = new Set<string>();
 			for (const pattern of patterns) {
@@ -2080,10 +2085,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	// Resolves the session/agent thinking level using the same precedence we
 	// apply at startup: explicit option → persisted session entry → restored
-	// model selector suffix → default role's explicit selector → selected
-	// model's defaultLevel → global settings default. Run again after extension
-	// role reclaim so the final model's own defaults aren't masked by an earlier
-	// fallback model's.
+	// model selector suffix → default role's explicit selector → active preset
+	// defaultThinkingLevel → selected model's defaultLevel → global settings
+	// default. Run again after extension role reclaim so the final model's own
+	// defaults aren't masked by an earlier fallback model's.
 	const pickInitialThinkingLevel = (selectedModel: Model | undefined): ConfiguredThinkingLevel | undefined => {
 		let level = options.thinkingLevel;
 		if (level === undefined && hasExistingSession && hasThinkingEntry) {
@@ -2097,18 +2102,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (level === undefined && !hasExplicitModel && !hasThinkingEntry && defaultRoleSpec.explicitThinkingLevel) {
 			level = defaultRoleSpec.thinkingLevel;
 		}
+		if (level === undefined) {
+			// The active preset's defaultThinkingLevel wins over the selected model's default.
+			const preset = existingSession.activePreset
+				? getModelPreset(settings, existingSession.activePreset)
+				: undefined;
+			level = preset?.kind === "found" ? preset.preset.defaultThinkingLevel : undefined;
+		}
 		if (level === undefined && selectedModel?.thinking?.defaultLevel !== undefined) {
 			level = selectedModel.thinking.defaultLevel;
 		}
 		if (level === undefined) {
-			// The active preset's defaultThinkingLevel (when it records one) wins
-			// over the base settings' default.
-			const preset = existingSession.activePreset
-				? getModelPreset(settings, existingSession.activePreset)
-				: undefined;
-			level =
-				(preset?.kind === "found" ? preset.preset.defaultThinkingLevel : undefined) ??
-				parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(settings));
+			level = parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(settings));
 		}
 		return level;
 	};
@@ -3208,8 +3213,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// Re-resolve the allowed set: extension factories and discovery
 				// refreshes above may have registered models not visible earlier.
 				const fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
-				const reResolvedRoleSpec = resolveModelRoleValue(settings.getModelRole("default"), fallbackCandidates, {
+				const reResolvedRoleSpec = resolveModelRoleValue(configuredDefaultRoleValue, fallbackCandidates, {
 					settings,
+					roleLookup: configuredDefaultRoleLookup,
 					matchPreferences: modelMatchPreferences,
 				});
 				if (!reResolvedRoleSpec.model) return false;
@@ -3246,7 +3252,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// configured (must win over `pick`) or nothing resolved at all.
 				// The common path — role already resolved, or a `pick` with no
 				// configured default — never pays for it.
-				const defaultRoleConfigured = Boolean(settings.getModelRole("default"));
+				const defaultRoleConfigured = Boolean(configuredDefaultRoleValue);
 				if (
 					!hasExplicitModel &&
 					(defaultRoleConfigured || !pick) &&

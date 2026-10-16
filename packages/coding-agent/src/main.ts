@@ -55,6 +55,7 @@ import {
 	resolveModelScope,
 	type ScopedModel,
 } from "./config/model-resolver";
+import { getModelPreset } from "./config/model-presets";
 import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
 import { all, combine, type ProtocolHost, type SettingValueOf } from "./config/registry";
@@ -1410,6 +1411,14 @@ export async function buildSessionOptions(
 	// - supports --model <provider>/<pattern>
 	const modelMatchPreferences = getModelMatchPreferences(activeSettings);
 	const disabledProviders = disabledProviderIds(activeSettings);
+	const startupPreset = parsed.preset === undefined ? undefined : getModelPreset(activeSettings, parsed.preset);
+	const startupRoleLookup =
+		startupPreset?.kind === "found"
+			? {
+					getModelRole: (role: string) =>
+						startupPreset.preset.modelRoles[role] ?? activeSettings.getModelRole(role),
+				}
+			: undefined;
 	// `--model` rewrites the session's `default` role below. Preserve the
 	// configured assignment so explicit prewalk role targets still resolve
 	// against the value that existed when the CLI was invoked.
@@ -1467,13 +1476,14 @@ export async function buildSessionOptions(
 			}
 		}
 	} else if (scopedModels.length > 0 && !restoringSession) {
-		const remembered = activeSettings.getModelRole("default");
+		const remembered = startupRoleLookup?.getModelRole("default") ?? activeSettings.getModelRole("default");
 		if (remembered) {
 			const rememberedSpec = resolveModelRoleValue(
 				remembered,
 				scopedModels.map(scopedModel => scopedModel.model),
 				{
 					settings: activeSettings,
+					roleLookup: startupRoleLookup,
 					matchPreferences: modelMatchPreferences,
 				},
 			);

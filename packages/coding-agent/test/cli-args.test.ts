@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import type { Model } from "@oh-my-pi/pi-ai";
+import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { cfgModelPresets } from "@oh-my-pi/pi-coding-agent/config/model-settings";
@@ -35,6 +35,23 @@ describe("--preset CLI flag", () => {
 		authStorage = await AuthStorage.create(path.join(fixtureDir.path(), "auth.db"));
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage, path.join(fixtureDir.path(), "models.yml"));
+		modelRegistry.registerProvider("preset-thinking", {
+			api: "openai-completions",
+			apiKey: "test-key",
+			baseUrl: "https://example.com/v1",
+			models: [
+				{
+					id: "default-level-model",
+					name: "Default Level Model",
+					reasoning: true,
+					thinking: { mode: "effort", efforts: [Effort.Low, Effort.High], defaultLevel: Effort.High },
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128_000,
+					maxTokens: 8_192,
+				},
+			],
+		});
 	});
 
 	afterEach(async () => {
@@ -43,6 +60,7 @@ describe("--preset CLI flag", () => {
 	});
 
 	afterAll(() => {
+		modelRegistry.unregisterProvider("preset-thinking");
 		authStorage.close();
 		fixtureDir.removeSync();
 	});
@@ -98,6 +116,19 @@ describe("--preset CLI flag", () => {
 		expect(session.model?.id).toBe("claude-opus-4-5");
 		// The preset fills the remaining roles.
 		expect(session.effectiveModelRole("smol")).toBe(SONNET_46);
+	});
+
+	it("applies a preset defaultThinkingLevel over the selected model default", async () => {
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "preset-thinking/default-level-model");
+		cfgModelPresets.setEntry(settings, "p", {
+			modelRoles: { default: "preset-thinking/default-level-model" },
+			defaultThinkingLevel: Effort.Low,
+		});
+
+		const session = await startSession({ settings, preset: "p" });
+
+		expect(session.thinkingLevel).toBe(Effort.Low);
 	});
 
 	it("rejects an unknown preset at startup, naming the available presets", async () => {
