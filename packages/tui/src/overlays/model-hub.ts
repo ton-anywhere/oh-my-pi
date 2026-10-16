@@ -115,6 +115,8 @@ export interface ModelHubSource extends ModelBrowserSource {
 	 * matches, if any. Absent hosts have no presets to switch between.
 	 */
 	getModelPresets?(): { names: readonly string[]; active: string | undefined };
+	/** The session's recorded preset for the active marker; `undefined` when none is active. */
+	readonly activePreset?: string | undefined;
 }
 
 /** Catalog capabilities required by the model hub. */
@@ -449,7 +451,7 @@ export class ModelHubComponent implements Component {
 	 * attempt; steps from it while nothing matches the setup or nothing changed since.
 	 */
 	#presetCursor: { name: string; revision: number } | undefined;
-	#presetsMemo: { revision: number; names: readonly string[]; active: string | undefined } | undefined;
+	#presetsMemo: { revision: number; activePreset: string | undefined; names: readonly string[]; active: string | undefined } | undefined;
 	#disposed = false;
 	/** Per-provider fuzzy match counts while a query is active; null when not searching. */
 	#searchCounts: Map<string, number> | null = null;
@@ -1914,9 +1916,10 @@ export class ModelHubComponent implements Component {
 	#presets(): { names: readonly string[]; active: string | undefined } {
 		if (!this.#callbacks.onSwitchPreset || !this.#settings.getModelPresets) return { names: [], active: undefined };
 		const revision = this.#settings.revision;
-		if (this.#presetsMemo?.revision !== revision) {
+		const activePreset = this.#settings.activePreset;
+		if (this.#presetsMemo?.revision !== revision || this.#presetsMemo?.activePreset !== activePreset) {
 			const { names, active } = this.#settings.getModelPresets();
-			this.#presetsMemo = { revision, names, active };
+			this.#presetsMemo = { revision, activePreset, names, active };
 		}
 		return this.#presetsMemo;
 	}
