@@ -458,7 +458,9 @@ export class ModelHubComponent implements Component {
 	 * attempt; steps from it while nothing matches the setup or nothing changed since.
 	 */
 	#presetCursor: { name: string; revision: number } | undefined;
-	#presetsMemo: { revision: number; activePreset: string | undefined; names: readonly string[]; active: string | undefined } | undefined;
+	#presetsMemo:
+		| { revision: number; activePreset: string | undefined; names: readonly string[]; active: string | undefined }
+		| undefined;
 	#disposed = false;
 	/** Per-provider fuzzy match counts while a query is active; null when not searching. */
 	#searchCounts: Map<string, number> | null = null;

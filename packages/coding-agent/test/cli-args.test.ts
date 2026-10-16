@@ -57,12 +57,14 @@ describe("--preset CLI flag", () => {
 		return settings;
 	}
 
-	async function startSession(options: {
-		settings?: Settings;
-		preset?: string;
-		model?: Model;
-		sessionManager?: SessionManager;
-	} = {}) {
+	async function startSession(
+		options: {
+			settings?: Settings;
+			preset?: string;
+			model?: Model;
+			sessionManager?: SessionManager;
+		} = {},
+	) {
 		const cwd = fixtureDir.path();
 		const result = await createAgentSession({
 			cwd,

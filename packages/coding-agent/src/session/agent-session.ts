@@ -10083,7 +10083,11 @@ export class AgentSession implements SettingsScope {
 			this.#settings = overlay;
 			if (this.#presetReResolveWarned) return;
 			this.#presetReResolveWarned = true;
-			this.emitNotice("warning", `Model preset "${preset}" is unavailable; using the base default model.`, "model-preset");
+			this.emitNotice(
+				"warning",
+				`Model preset "${preset}" is unavailable; using the base default model.`,
+				"model-preset",
+			);
 			return;
 		}
 		// Definition present: apply its default only when it resolves to an available, authed model.
