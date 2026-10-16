@@ -1219,7 +1219,12 @@ export class SelectorController {
 					),
 				onSavePreset: name => {
 					try {
-						saveModelPreset(this.ctx.settings, name);
+						saveModelPreset(
+							this.ctx.settings,
+							name,
+							this.ctx.session.effectiveModelRoles(),
+							this.ctx.session.effectiveDefaultThinkingLevel(),
+						);
 						this.ctx.showStatus(modelPresetSavedMessage(this.ctx.settings, name));
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));

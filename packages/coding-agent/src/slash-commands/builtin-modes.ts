@@ -964,7 +964,7 @@ async function runPresetsCommand(
 					usage: true,
 				};
 			}
-			saveModelPreset(settings, name);
+			saveModelPreset(settings, name, session.effectiveModelRoles(), session.effectiveDefaultThinkingLevel());
 			return { message: modelPresetSavedMessage(settings, name), changedConfig: true };
 		}
 		case "switch": {

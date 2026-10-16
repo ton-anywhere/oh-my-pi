@@ -109,7 +109,7 @@ export function snapcompactHistoryBlockOptions(
 export interface SessionContext {
 	messages: AgentMessage[];
 	thinkingLevel?: string;
-	/** Configured thinking selector (`"auto"` or a concrete level) from the latest change. */
+	/** Configured thinking selector from the latest explicit change; automatic receipts are ignored. */
 	configuredThinkingLevel?: string;
 	serviceTier?: ServiceTierByFamily;
 	/** Model roles: { default: "provider/modelId", small: "provider/modelId", ... } */
@@ -325,7 +325,7 @@ export function buildSessionContext(
 	for (const entry of path) {
 		if (entry.type === "thinking_level_change") {
 			thinkingLevel = entry.thinkingLevel ?? "off";
-			configuredThinkingLevel = entry.configured ?? entry.thinkingLevel ?? undefined;
+			configuredThinkingLevel = entry.explicit ? (entry.configured ?? entry.thinkingLevel ?? undefined) : undefined;
 		} else if (entry.type === "model_change") {
 			// New format: { model: "provider/id", role?: string }
 			if (entry.model) {

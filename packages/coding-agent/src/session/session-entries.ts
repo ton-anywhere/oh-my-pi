@@ -118,6 +118,8 @@ export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 	 * before auto-mode persistence existed; readers fall back to `thinkingLevel`.
 	 */
 	configured?: string | null;
+	/** True when this thinking selector was explicitly chosen by the user or CLI. */
+	explicit?: boolean;
 }
 
 export interface ModelChangeEntry extends SessionEntryBase {
