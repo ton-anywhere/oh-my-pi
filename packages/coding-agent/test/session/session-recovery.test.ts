@@ -200,6 +200,145 @@ describe("resolveSessionRecovery", () => {
 		);
 	});
 
+	it("preserves repository metadata when later header fields exceed the listing prefix", async () => {
+		const launchCwd = await directory("unrelated");
+		const primary = await directory("primary");
+		const missingCwd = missingDirectory("missing-cwd");
+		const repository = { sessionWorktreeRoot: missingCwd, primaryWorktreeRoot: primary };
+		const additionalDirectories = Array.from({ length: 200 }, (_, index) =>
+			path.join(root, `additional-${index}-${"x".repeat(32)}`),
+		);
+		const line = JSON.stringify({
+			type: "session",
+			version: 4,
+			id: "oversized",
+			timestamp: new Date(0).toISOString(),
+			cwd: missingCwd,
+			title: "oversized",
+			repository,
+			additionalDirectories,
+		});
+		expect(Buffer.byteLength(line)).toBeGreaterThan(4096);
+		const sessionDir = await directory("sessions");
+		await fs.writeFile(path.join(sessionDir, "oversized.jsonl"), `${line}\n`);
+
+		const listed = await SessionManager.listForPicker(launchCwd, sessionDir);
+		expect(listed).toHaveLength(1);
+		expect(listed[0]?.repository).toEqual(repository);
+		expect(await resolveSessionRecovery(listed[0]!, launchCwd)).toEqual({
+			kind: "relocate",
+			directory: primary,
+		});
+	});
+
+	it("reads repository metadata after large preceding header fields", async () => {
+		const launchCwd = await directory("unrelated");
+		const primary = await directory("primary");
+		const missingCwd = missingDirectory("missing-cwd");
+		const repository = { sessionWorktreeRoot: missingCwd, primaryWorktreeRoot: primary };
+		const additionalDirectories = Array.from({ length: 200 }, (_, index) =>
+			path.join(root, `additional-${index}-${"x".repeat(32)}`),
+		);
+		const line = JSON.stringify({
+			type: "session",
+			version: 4,
+			id: "repository-after-padding",
+			timestamp: new Date(0).toISOString(),
+			cwd: missingCwd,
+			title: "repository-after-padding",
+			additionalDirectories,
+			repository,
+		});
+		expect(Buffer.byteLength(line)).toBeGreaterThan(4096);
+		const sessionDir = await directory("sessions");
+		await fs.writeFile(path.join(sessionDir, "repository-after-padding.jsonl"), `${line}\n`);
+
+		const listed = await SessionManager.listForPicker(launchCwd, sessionDir);
+		expect(listed).toHaveLength(1);
+		expect(listed[0]?.repository).toEqual(repository);
+		expect(await resolveSessionRecovery(listed[0]!, launchCwd)).toEqual({
+			kind: "relocate",
+			directory: primary,
+		});
+	});
+
+	it("reads repository metadata after a title slot and large preceding fields", async () => {
+		const launchCwd = await directory("unrelated");
+		const primary = await directory("primary");
+		const missingCwd = missingDirectory("missing-cwd");
+		const repository = { sessionWorktreeRoot: missingCwd, primaryWorktreeRoot: primary };
+		const additionalDirectories = Array.from({ length: 200 }, (_, index) =>
+			path.join(root, `additional-${index}-${"x".repeat(32)}`),
+		);
+		const titleSlot = JSON.stringify({ type: "title", v: 1, title: "saved title" });
+		const header = JSON.stringify({
+			type: "session",
+			version: 4,
+			id: "title-slot-repository",
+			timestamp: new Date(0).toISOString(),
+			cwd: missingCwd,
+			title: "header title",
+			additionalDirectories,
+			repository,
+		});
+		expect(Buffer.byteLength(header)).toBeGreaterThan(4096);
+		const sessionDir = await directory("sessions");
+		await fs.writeFile(path.join(sessionDir, "title-slot-repository.jsonl"), `${titleSlot}\n${header}\n`);
+
+		const listed = await SessionManager.listForPicker(launchCwd, sessionDir);
+		expect(listed).toHaveLength(1);
+		expect(listed[0]?.repository).toEqual(repository);
+		expect(await resolveSessionRecovery(listed[0]!, launchCwd)).toEqual({
+			kind: "relocate",
+			directory: primary,
+		});
+	});
+
+	it("reads repository metadata when the prefix cuts through its object", async () => {
+		const launchCwd = await directory("unrelated");
+		const primary = await directory("primary");
+		const missingCwd = missingDirectory("missing-cwd");
+		const repository = { sessionWorktreeRoot: missingCwd, primaryWorktreeRoot: primary };
+		const baseLine = JSON.stringify({
+			type: "session",
+			version: 4,
+			id: "repository-split",
+			timestamp: new Date(0).toISOString(),
+			cwd: missingCwd,
+			title: "repository-split",
+			additionalDirectories: [""],
+			repository,
+		});
+		const repositoryValueIndex = baseLine.indexOf('{"sessionWorktreeRoot"');
+		const additionalDirectoryPrefix = path.join(root, "additional-");
+		const additionalDirectoryLength = 4080 - repositoryValueIndex - additionalDirectoryPrefix.length;
+		expect(additionalDirectoryLength).toBeGreaterThan(0);
+		const additionalDirectories = [`${additionalDirectoryPrefix}${"x".repeat(additionalDirectoryLength)}`];
+		const line = JSON.stringify({
+			type: "session",
+			version: 4,
+			id: "repository-split",
+			timestamp: new Date(0).toISOString(),
+			cwd: missingCwd,
+			title: "repository-split",
+			additionalDirectories,
+			repository,
+		});
+		const actualRepositoryValueIndex = line.indexOf('{"sessionWorktreeRoot"');
+		expect(actualRepositoryValueIndex).toBe(4080);
+		expect(line.indexOf("}", actualRepositoryValueIndex)).toBeGreaterThan(4096);
+		const sessionDir = await directory("sessions");
+		await fs.writeFile(path.join(sessionDir, "repository-split.jsonl"), `${line}\n`);
+
+		const listed = await SessionManager.listForPicker(launchCwd, sessionDir);
+		expect(listed).toHaveLength(1);
+		expect(listed[0]?.repository).toEqual(repository);
+		expect(await resolveSessionRecovery(listed[0]!, launchCwd)).toEqual({
+			kind: "relocate",
+			directory: primary,
+		});
+	});
+
 	it("relocates a legacy removed-worktree session to the current repository", async () => {
 		const fixture = await removedWorktreeFixture();
 
