@@ -31,6 +31,7 @@ import {
 export function createModelBrowserSource(
 	settings: Settings,
 	sessionServiceTier?: (model: Model) => ServiceTier | undefined,
+	activePreset?: () => string | undefined,
 ): ModelHubSource {
 	return {
 		get revision() {
@@ -85,7 +86,10 @@ export function createModelBrowserSource(
 		getRoleInfo: role => getRoleInfo(role, settings),
 		defaultRoleChain: role => rolePriorityDefaults(role),
 		resolveRoleValue: (value, models, roleLookup) => resolveModelRoleValue(value, models, { settings, roleLookup }),
-		getModelPresets: () => ({ names: getModelPresetNames(settings), active: findActiveModelPreset(settings) }),
+		getModelPresets: () => ({ names: getModelPresetNames(settings), active: activePreset?.() ?? findActiveModelPreset(settings) }),
+		get activePreset() {
+			return activePreset?.();
+		},
 		compactionPointFor: model => describeModelCompactionPoint(settings, model),
 	};
 }

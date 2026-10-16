@@ -516,6 +516,7 @@ export class SelectorController {
 				getAvailableModels: () => this.ctx.session.modelRegistry.getAvailable(),
 				browserSource: createModelBrowserSource(this.ctx.settings, model =>
 					this.ctx.session.effectiveServiceTier(model),
+					() => this.ctx.session.activePreset,
 				),
 				defaultToolNames: ADVISOR_DEFAULT_TOOL_NAMES,
 				externalEditor: text => {
@@ -897,7 +898,7 @@ export class SelectorController {
 		};
 		const hub = new ModelHubComponent(
 			this.ctx.ui,
-			createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
+			createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model), () => this.ctx.session.activePreset),
 			this.ctx.session.modelRegistry,
 			this.ctx.session.scopedModels,
 			{
