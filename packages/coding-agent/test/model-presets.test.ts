@@ -474,7 +474,7 @@ describe("model presets", () => {
 		expect(result.shadowedThinking).toBeUndefined();
 		expect(isCleanModelPresetSwitch(result)).toBe(true);
 	});
-	it("reports an explicit session thinking override as the target shadow", async () => {
+	it("applies the preset thinking level over an explicit session override (no shadow)", async () => {
 		const settings = Settings.isolated();
 		cfgModelPresets.setEntry(settings, "cheap", {
 			modelRoles: { default: OPUS },
@@ -486,12 +486,11 @@ describe("model presets", () => {
 		const result = await applyModelPreset(settings, session, "cheap");
 
 		if (result.kind !== "switched") throw new Error(`expected switched, got ${result.kind}`);
-		expect(result.shadowedThinking).toEqual({
-			expected: Effort.Low,
-			actual: Effort.High,
-			source: "session",
-		});
+		// The preset's level is applied over the explicit override, so the
+		// switch is clean: no thinking shadow is reported.
+		expect(result.shadowedThinking).toBeUndefined();
 		expect(session.thinkingLevel).toBe(Effort.Low);
+		expect(isCleanModelPresetSwitch(result)).toBe(true);
 	});
 
 	it("does not list a preset a --config overlay tombstones, but keeps one a project null falls through", async () => {

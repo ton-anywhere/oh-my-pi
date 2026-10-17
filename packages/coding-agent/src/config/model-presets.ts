@@ -276,20 +276,15 @@ function targetShadowedRoles(
 }
 
 function targetShadowedThinking(
-	settings: Settings,
-	session: ModelPresetSession,
-	preset: ModelPreset,
+	_settings: Settings,
+	_session: ModelPresetSession,
+	_preset: ModelPreset,
 ): ModelPresetShadowedThinking | undefined {
-	const expected = preset.defaultThinkingLevel;
-	if (expected === undefined) return undefined;
-	const sessionOverride = session.hasExplicitThinkingOverride();
-	const actual = sessionOverride ? session.configuredThinkingLevel() : expected;
-	if (actual === expected) return undefined;
-	return {
-		expected,
-		actual,
-		source: sessionOverride ? "session" : cfgDefaultThinkingLevel.provenance(settings),
-	};
+	// The preset's thinking level is applied on switch (replacing any prior
+	// explicit effort), so it is never shadowed: reporting the prior effort as
+	// retained would contradict the applied thinking and mark a clean switch
+	// unclean.
+	return undefined;
 }
 
 /**
@@ -341,7 +336,7 @@ async function applyModelPresetLocked(
 	const shadowedThinking = targetShadowedThinking(settings, session, preset);
 	const presetDefault =
 		session.sessionRoleOverrides["default"] ??
-		(Object.hasOwn(preset.modelRoles, "default") ? preset.modelRoles.default : undefined);
+		(Object.hasOwn(preset.modelRoles, "default") ? preset.modelRoles.default : settings.getModelRole("default"));
 
 	let model: Model | undefined;
 	let thinkingLevel: ConfiguredThinkingLevel | undefined;

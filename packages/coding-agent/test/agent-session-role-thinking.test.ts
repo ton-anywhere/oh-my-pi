@@ -338,7 +338,7 @@ describe("AgentSession role model thinking behavior", () => {
 		const autoReceiptCount = session.sessionManager
 			.getEntries()
 			.filter(entry => entry.type === "thinking_level_change").length;
-		session.setThinkingLevel(AUTO_THINKING);
+		session.setThinkingLevel(AUTO_THINKING, false, false);
 		expect(session.sessionManager.getEntries().filter(entry => entry.type === "thinking_level_change")).toHaveLength(
 			autoReceiptCount,
 		);
@@ -810,8 +810,7 @@ describe("AgentSession role model thinking behavior", () => {
 	});
 	it("preserves thinking from a preset-only role in the temporary picker", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
-		const temporaryModel = getBundledModel("google-antigravity", "gemini-3.5-flash");
-		if (!temporaryModel) throw new Error("Expected google-antigravity model gemini-3.5-flash to exist");
+		const temporaryModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
 
 		await createSession({
 			initialModelId: defaultModel.id,

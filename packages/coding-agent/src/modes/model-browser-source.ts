@@ -104,7 +104,7 @@ export function createModelBrowserSource(
 			}),
 		getModelPresets: () => ({
 			names: getModelPresetNames(settings),
-			active: activePreset?.() ?? findActiveModelPreset(settings),
+			active: activePreset ? activePreset() : findActiveModelPreset(settings),
 		}),
 		get activePreset() {
 			return activePreset?.();
