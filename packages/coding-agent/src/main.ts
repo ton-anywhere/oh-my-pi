@@ -1412,13 +1412,32 @@ export async function buildSessionOptions(
 	const modelMatchPreferences = getModelMatchPreferences(activeSettings);
 	const disabledProviders = disabledProviderIds(activeSettings);
 	const startupPreset = parsed.preset === undefined ? undefined : getModelPreset(activeSettings, parsed.preset);
+	// Explicit CLI role flags (--smol, --slow, --plan) outrank the startup
+	// preset's roles, which outrank the durable base roles.
+	const cliRoleValues: Record<string, string | undefined> = {
+		smol: parsed.smol,
+		slow: parsed.slow,
+		plan: parsed.plan,
+	};
 	const startupRoleLookup =
 		startupPreset?.kind === "found"
 			? {
 					getModelRole: (role: string) =>
-						startupPreset.preset.modelRoles[role] ?? activeSettings.getModelRole(role),
+						cliRoleValues[role] ?? startupPreset.preset.modelRoles[role] ?? activeSettings.getModelRole(role),
 				}
 			: undefined;
+	// Carry the explicit CLI role flags into the session so live and deferred
+	// role resolution (not just the immediate `--model` resolution) honor them
+	// over the active preset's roles.
+	const cliRoleOverrides: Record<string, string> = {};
+	for (const [role, value] of Object.entries(cliRoleValues)) {
+		if (value !== undefined) {
+			cliRoleOverrides[role] = value;
+		}
+	}
+	if (Object.keys(cliRoleOverrides).length > 0) {
+		options.cliRoleOverrides = cliRoleOverrides;
+	}
 	// `--model` rewrites the session's `default` role below. Preserve the
 	// configured assignment so explicit prewalk role targets still resolve
 	// against the value that existed when the CLI was invoked.

@@ -1065,6 +1065,7 @@ export class AgentSession implements SettingsScope {
 	readonly #streamingEditGuard: StreamingEditGuard;
 	readonly #loopGuards: LoopGuards;
 	#promptInFlightCount = 0;
+	#presetReconcilePending = false;
 	#abortInProgress = false;
 	/** Submissions accepted by prompt()/promptCustomMessage()/sendCustomMessage() that have not
 	 *  yet dispatched a turn, queued, or bailed. Preprocessing (manual-compaction wait, slash
@@ -1181,6 +1182,12 @@ export class AgentSession implements SettingsScope {
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
 		this.#flushPendingAgentEnd();
+		// A preset edit that landed mid-request is reconciled at this safe
+		// boundary, once the last in-flight prompt has settled.
+		if (this.#presetReconcilePending) {
+			this.#presetReconcilePending = false;
+			this.#reconcileActivePresetLive();
+		}
 		if (this.#inFlightSettledCallbacks.length === 0) {
 			this.#drainStrandedQueuedMessages();
 			return;
@@ -10264,6 +10271,13 @@ export class AgentSession implements SettingsScope {
 			const modelChanged = !this.model || !modelsAreEqual(this.model, target);
 			const thinkingChanged = this.configuredThinkingLevel() !== thinkingLevel;
 			if (!modelChanged && !thinkingChanged) return;
+			// Never rebind mid-request: closing the provider session or swapping
+			// the model while a prompt is streaming corrupts the in-flight turn.
+			// Defer to the safe boundary when the last in-flight prompt settles.
+			if (this.isStreaming) {
+				this.#presetReconcilePending = true;
+				return;
+			}
 			void (async () => {
 				if (modelChanged) {
 					const previousEditMode = this.#tools.resolveActiveEditMode();
@@ -11940,7 +11954,9 @@ export class AgentSession implements SettingsScope {
 	async #resolveSessionModel(selectors: readonly string[]): Promise<ResolvedModelRoleValue | undefined> {
 		const roleLookup = { getModelRole: (role: string) => this.effectiveModelRole(role) };
 		const resolve = (): ResolvedModelRoleValue | undefined => {
-			const availableModels = this.#sessionModelCandidates();
+			// Restoration is not subject to the `--models` cycling scope: a saved,
+			// authenticated model must restore even when it is outside the scope.
+			const availableModels = this.#modelRegistry.getAvailable();
 			for (const selector of selectors) {
 				const restored = resolveModelRoleValue(selector, availableModels, {
 					settings: this.settings,

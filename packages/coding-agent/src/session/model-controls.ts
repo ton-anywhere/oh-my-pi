@@ -261,6 +261,11 @@ export class ModelControls {
 					options.thinkingLevel,
 				),
 			);
+			// A persisted selection is still this session's model: record the
+			// receipt so resume restores it instead of the previous selection.
+			// Not marked explicit: a durable selection must not become a session
+			// override that shadows later preset switches on replay.
+			this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role, false);
 		} else {
 			// Session-local explicit selection: record the user's selector (or the
 			// resolved id when none was given) as a tier-1 override so live
@@ -556,7 +561,7 @@ export class ModelControls {
 			if (persist) {
 				cfgDefaultThinkingLevel.set(this.#host.settings, AUTO_THINKING);
 			}
-			const isChanging = !wasAuto || previousLevel !== provisional;
+			const isChanging = !wasAuto || explicit || previousLevel !== provisional;
 			if (isChanging) {
 				this.#host.sessionManager.appendThinkingLevelChange(provisional, AUTO_THINKING, explicit);
 				this.#host.emit({ type: "thinking_level_changed", thinkingLevel: provisional, configured: AUTO_THINKING });
@@ -574,7 +579,10 @@ export class ModelControls {
 		// Leaving auto must persist even when the resolved effort is unchanged (e.g.
 		// auto resolved to medium, then the user pins medium): otherwise the latest
 		// session entry keeps `configured: "auto"` and resume re-enables auto.
-		const isChanging = wasAuto || effectiveLevel !== this.#thinkingLevel;
+		// An explicit selection pins the effort even when the resolved value is
+		// unchanged (re-selecting the current effort): record it so a later
+		// preset edit does not silently overwrite the user's choice.
+		const isChanging = wasAuto || explicit || effectiveLevel !== this.#thinkingLevel;
 
 		this.#thinkingLevel = effectiveLevel;
 		this.#applyThinkingLevelToAgent(effectiveLevel);

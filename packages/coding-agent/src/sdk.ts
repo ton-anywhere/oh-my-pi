@@ -601,6 +601,12 @@ export interface CreateAgentSessionOptions {
 	 * `preset_change` when it differs from the preset the session replayed.
 	 */
 	preset?: string;
+	/**
+	 * Explicit CLI role flags (--smol, --slow, --plan) as role → selector.
+	 * Session-scoped: outranks the active preset's roles for live and deferred
+	 * role resolution. Not persisted to the transcript.
+	 */
+	cliRoleOverrides?: Record<string, string>;
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
@@ -1964,6 +1970,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		existingSession.activePreset = options.preset;
 	}
+	// Explicit CLI role flags (--smol, --slow, --plan) are session-scoped: they
+	// outrank the active preset's roles for live and deferred role resolution, so
+	// seed them into the session overrides before the role lookup is built.
+	if (options.cliRoleOverrides) {
+		for (const [role, value] of Object.entries(options.cliRoleOverrides)) {
+			if (value !== undefined) {
+				existingSession.explicitRoleOverrides[role] = value;
+			}
+		}
+	}
 
 	// Session model presets: the active preset's roles are resolved on the fly
 	// (explicit session override → active preset role → base `modelRoles`); the
@@ -1991,10 +2007,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const hasExplicitModel = options.model !== undefined || deferredModelPatterns.length > 0;
 	const modelMatchPreferences = getModelMatchPreferences(settings);
 	const defaultRoleValue = effectiveRole("default");
-	const configuredDefaultRoleValue = existingSession.activePreset
-		? defaultRoleValue
-		: settings.getModelRole("default");
-	const configuredDefaultRoleLookup = existingSession.activePreset ? effectiveRoleLookup : settings;
+	// The default-role value and lookup always consult the session-aware
+	// effective lookup (overrides -> active preset -> base), regardless of
+	// whether a preset is active: a CLI --slow/--smol/--plan override or an
+	// explicit session role must resolve even when no preset is in play.
+	const configuredDefaultRoleValue = defaultRoleValue;
+	const configuredDefaultRoleLookup = effectiveRoleLookup;
 	let explicitDefaultProviders: Set<string> | undefined;
 	if ((cfgEnabledModels.get(settings)?.length ?? 0) === 0) {
 		const patterns = resolveConfiguredModelPatterns(defaultRoleValue, configuredDefaultRoleLookup);
@@ -2920,6 +2938,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						cliModel: trimmedSelector,
 						modelRegistry,
 						settings,
+						roleLookup: effectiveRoleLookup,
 						preferences: matchPreferences,
 					});
 					// Only a concretely resolved model counts as a runtime match. A role
@@ -2955,6 +2974,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						cliModel: trimmedSelector,
 						modelRegistry,
 						settings,
+						roleLookup: effectiveRoleLookup,
 						preferences: matchPreferences,
 					});
 					if (resolved.configuredPatterns && resolved.configuredPatterns.length > 0) {
@@ -2973,7 +2993,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								...Object.keys(settings.getModelRoles()),
 								resolved.configuredRole,
 							]),
-							getModelRole: role => settings.getModelRole(role),
+							getModelRole: role => effectiveRole(role),
 							modelLookup: modelRegistry,
 						};
 						const originalSelector = resolved.configuredPatterns[0];
@@ -3016,7 +3036,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							},
 						];
 					}
-					return resolveConfiguredModelPatterns([trimmedSelector], settings).map(pattern => ({
+					return resolveConfiguredModelPatterns([trimmedSelector], effectiveRoleLookup).map(pattern => ({
 						pattern,
 						retryFallback: undefined,
 					}));

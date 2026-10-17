@@ -338,7 +338,7 @@ describe("AgentSession role model thinking behavior", () => {
 		const autoReceiptCount = session.sessionManager
 			.getEntries()
 			.filter(entry => entry.type === "thinking_level_change").length;
-		session.setThinkingLevel(AUTO_THINKING);
+		session.setThinkingLevel(AUTO_THINKING, false, false);
 		expect(session.sessionManager.getEntries().filter(entry => entry.type === "thinking_level_change")).toHaveLength(
 			autoReceiptCount,
 		);
