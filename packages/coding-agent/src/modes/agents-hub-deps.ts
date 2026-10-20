@@ -17,6 +17,7 @@ import {
 	resolveModelOverride,
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import agentCreationArchitectPrompt from "../prompts/system/agent-creation-architect.md" with { type: "text" };
 import agentCreationUserPrompt from "../prompts/system/agent-creation-user.md" with { type: "text" };
 import { createAgentSession } from "../sdk";
@@ -61,9 +62,20 @@ export function createAgentsHubDeps(
 	activeModelPattern?: string,
 	defaultModelPattern?: string,
 	sessionServiceTier?: (model: Model) => ServiceTier | undefined,
+	activePreset?: () => string | undefined,
+	effectiveModelRole?: (role: string) => string | undefined,
+	effectiveDefaultThinkingLevel?: () => ConfiguredThinkingLevel | undefined,
+	sessionRoleOverrides?: () => Readonly<Record<string, string>>,
 ): AgentsHubDeps {
 	return {
-		browserSource: createModelBrowserSource(settings, sessionServiceTier),
+		browserSource: createModelBrowserSource(
+			settings,
+			sessionServiceTier,
+			activePreset,
+			effectiveModelRole,
+			effectiveDefaultThinkingLevel,
+			sessionRoleOverrides,
+		),
 		loadAgents: async () => {
 			const { agents } = await discoverAgents(cwd, undefined, extensionRoots());
 			const disabled = new Set(cfgTaskDisabledAgents.get(settings));
@@ -97,6 +109,7 @@ export function createAgentsHubDeps(
 				patterns,
 				modelRegistry,
 				settings,
+				effectiveModelRole ? { getModelRole: effectiveModelRole } : undefined,
 			);
 			if (!model) return undefined;
 			const level = explicitThinkingLevel && thinkingLevel ? `:${thinkingLevel}` : "";
@@ -142,10 +155,18 @@ export function createAgentsHubDeps(
 		generateAgent: async (description, onText) => {
 			await modelRegistry.refresh();
 			const patterns = resolveConfiguredModelPatterns(
-				activeModelPattern ?? defaultModelPattern ?? settings.getModelRole("default"),
-				settings,
+				activeModelPattern ??
+					defaultModelPattern ??
+					effectiveModelRole?.("default") ??
+					settings.getModelRole("default"),
+				effectiveModelRole ? { getModelRole: effectiveModelRole } : settings,
 			);
-			const { model } = resolveModelOverride(patterns, modelRegistry, settings);
+			const { model } = resolveModelOverride(
+				patterns,
+				modelRegistry,
+				settings,
+				effectiveModelRole ? { getModelRole: effectiveModelRole } : undefined,
+			);
 			const selectedModel = model ?? modelRegistry.getAvailable()[0];
 			if (!selectedModel) throw new Error("No available model to generate agent specification.");
 			const { session } = await createAgentSession({

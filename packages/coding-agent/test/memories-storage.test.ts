@@ -224,6 +224,7 @@ describe("memories/storage", () => {
 			},
 			settings,
 			model,
+			effectiveModelRole: (role: string) => settings.getModelRole(role),
 			refreshBaseSystemPrompt: async () => settled.resolve(),
 		} as unknown as Parameters<typeof startMemoryStartupTask>[0]["session"];
 		const modelRegistry = {

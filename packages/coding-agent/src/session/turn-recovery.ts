@@ -222,6 +222,8 @@ export interface TurnRecoveryHost {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** The session's effective selector for `role`: explicit override → active preset → base settings. */
+	effectiveModelRole(role: string): string | undefined;
 	modelRegistry: ModelRegistry;
 	configWarnings: string[];
 	model(): Model | undefined;
@@ -1752,7 +1754,7 @@ export class TurnRecovery {
 	#getRetryFallbackResolutionContext(): RetryFallbackResolutionContext {
 		return {
 			chains: this.#getRetryFallbackChains(),
-			getModelRole: role => this.#host.settings.getModelRole(role),
+			getModelRole: role => this.#host.effectiveModelRole(role),
 			modelLookup: this.#host.modelRegistry,
 		};
 	}
@@ -1907,9 +1909,11 @@ export class TurnRecovery {
 	#liveRetryRoleHint(currentModel: Model | null | undefined): string | undefined {
 		const role = this.#host.sessionManager?.getLastModelChangeRole?.({ skipEphemeral: true });
 		if (!role || !currentModel) return undefined;
-		const configured = this.#host.settings.getModelRole(role);
+		const configured = this.#host.effectiveModelRole(role);
 		if (!configured) return undefined;
-		const resolved = resolveModelOverride([configured], this.#host.modelRegistry, this.#host.settings);
+		const resolved = resolveModelOverride([configured], this.#host.modelRegistry, this.#host.settings, {
+			getModelRole: roleName => this.#host.effectiveModelRole(roleName),
+		});
 		return resolved.model && modelsAreEqual(resolved.model, currentModel) ? role : undefined;
 	}
 
