@@ -1612,6 +1612,7 @@ export function resolveModelOverride(
 	modelPatterns: string[],
 	modelRegistry: ModelLookupRegistry,
 	settings?: Settings,
+	roleLookup?: ModelRoleLookup,
 ): { model?: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel; explicitThinkingLevel: boolean; warning?: string } {
 	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
 	const availableModels = modelRegistry.getAvailable();
@@ -1625,6 +1626,7 @@ export function resolveModelOverride(
 			warning: patternWarning,
 		} = resolveModelRoleValue(pattern, availableModels, {
 			settings,
+			roleLookup,
 			matchPreferences,
 		});
 		if (model) {
@@ -2069,6 +2071,7 @@ interface CliModelOptions {
 	/** Authenticated models to prefer for unqualified selectors; defaults to the registry's authenticated set. */
 	availableModels?: Model<Api>[];
 	settings?: Settings;
+	roleLookup?: ModelRoleLookup;
 	preferences?: ModelMatchPreferences;
 }
 
@@ -2137,8 +2140,9 @@ function resolveCliModelInScope(
 	options: CliModelOptions & { cliModel: string },
 	scope: CliModelScope,
 ): ResolveCliModelResult {
-	const { cliProvider, cliModel, settings } = options;
+	const { cliProvider, cliModel, settings, roleLookup } = options;
 	const preferences = mergeModelMatchPreferences(settings, options.preferences);
+	const effectiveRoleLookup = roleLookup ?? settings;
 	const { all: allModels, available: availableModels } = scope;
 	if (allModels.length === 0) {
 		return {
@@ -2208,7 +2212,7 @@ function resolveCliModelInScope(
 		const roleSelector =
 			modelRoleAliasPrefixLength(trimmedModel) !== undefined
 				? trimmedModel
-				: settings?.getModelRole(bareRoleName) !== undefined
+				: effectiveRoleLookup?.getModelRole(bareRoleName) !== undefined
 					? `${formatModelRoleAlias(bareRoleName)}${bareRoleThinkingLevel ? `:${bareRoleThinkingLevel}` : ""}`
 					: undefined;
 		if (roleSelector) {
@@ -2217,16 +2221,18 @@ function resolveCliModelInScope(
 				modelRoleAliasPrefixLength(roleSelector) ?? -1,
 				MAX_THINKING_SUFFIX_OPTIONS,
 			);
-			const configuredRole = getModelRoleAlias(roleAlias, settings);
-			configuredPatterns = resolveConfiguredModelPatterns([roleSelector], settings);
+			const configuredRole = getModelRoleAlias(roleAlias, effectiveRoleLookup);
+			configuredPatterns = resolveConfiguredModelPatterns([roleSelector], effectiveRoleLookup);
 			const availableResolved = resolveModelRoleValue(roleSelector, availableModels, {
 				settings,
+				roleLookup: effectiveRoleLookup,
 				matchPreferences: preferences,
 			});
 			const resolved = availableResolved.model
 				? availableResolved
 				: resolveModelRoleValue(roleSelector, allModels, {
 						settings,
+						roleLookup: effectiveRoleLookup,
 						matchPreferences: preferences,
 					});
 			if (resolved.model) {

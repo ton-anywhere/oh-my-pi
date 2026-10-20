@@ -415,6 +415,8 @@ export interface SessionMaintenanceHost {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** The session's effective selector for `role`: explicit override → active preset → base settings. */
+	effectiveModelRole(role: string): string | undefined;
 	modelRegistry: ModelRegistry;
 	extensionRunner: ExtensionRunner | undefined;
 	sideStreamFn: StreamFn;
@@ -3507,7 +3509,9 @@ export class SessionMaintenance {
 		addCandidate(preferredModel ?? undefined);
 		for (const role of CHAT_MODEL_ROLE_IDS) {
 			addCandidate(
-				resolveRoleModelFull(this.#host.settings, role, availableModels, preferredModel ?? undefined).model,
+				resolveRoleModelFull(this.#host.settings, role, availableModels, preferredModel ?? undefined, {
+					getModelRole: r => this.#host.effectiveModelRole(r),
+				}).model,
 			);
 		}
 
