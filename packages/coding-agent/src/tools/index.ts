@@ -415,6 +415,8 @@ export interface ToolSession {
 	advertisedSessionAgents?: () => readonly AgentDefinition[];
 	/** Get resolved model string if explicitly set for this session */
 	getModelString?: () => string | undefined;
+	/** Get the session's effective selector for a model role. */
+	getEffectiveModelRole?: (role: string) => string | undefined;
 	/** Get the current session model string, regardless of how it was chosen */
 	getActiveModelString?: () => string | undefined;
 	/** Get the current session model object (provider/api capabilities), regardless of how it was chosen. */

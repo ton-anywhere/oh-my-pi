@@ -268,9 +268,12 @@ export class InputController {
 	/** Resolve the current tiny role at use time so project/session reloads cannot leave a stale model. */
 	#resolveTinyTitleLocalModelKey(): string | undefined {
 		const model = resolveModelRoleValue(
-			formatModelRoleAlias("tiny"),
+			this.ctx.session.effectiveModelRole("tiny") ?? formatModelRoleAlias("tiny"),
 			roleCandidatePool("tiny", this.ctx.settings, this.ctx.session.modelRegistry),
-			{ settings: this.ctx.settings },
+			{
+				settings: this.ctx.settings,
+				roleLookup: { getModelRole: role => this.ctx.session.effectiveModelRole(role) },
+			},
 		).model;
 		return model?.api === "local-inference" && isTinyLocalModelKey(model.id) ? model.id : undefined;
 	}
@@ -2621,7 +2624,14 @@ export class InputController {
 			basePath,
 			commandUsage: name => commandUsage.get(name),
 			modelMentions: createModelMentionSource({
-				source: createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
+				source: createModelBrowserSource(
+					this.ctx.settings,
+					model => this.ctx.session.effectiveServiceTier(model),
+					() => this.ctx.session.activePreset,
+					role => this.ctx.session.effectiveModelRole(role),
+					() => this.ctx.session.effectiveDefaultThinkingLevel(),
+					() => this.ctx.session.sessionRoleOverrides,
+				),
 				registry: this.ctx.session.modelRegistry,
 				scopedModels: () => this.ctx.session.scopedModels.map(s => s.model),
 			}),
