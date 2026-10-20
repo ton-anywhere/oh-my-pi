@@ -14,6 +14,7 @@ import { AUTO_THINKING, clampAutoThinkingEffort, resolveProvisionalAutoLevel } f
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
+import { cfgModelPresets } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 describe("AgentSession role model thinking behavior", () => {
@@ -337,7 +338,7 @@ describe("AgentSession role model thinking behavior", () => {
 		const autoReceiptCount = session.sessionManager
 			.getEntries()
 			.filter(entry => entry.type === "thinking_level_change").length;
-		session.setThinkingLevel(AUTO_THINKING);
+		session.setThinkingLevel(AUTO_THINKING, false, false);
 		expect(session.sessionManager.getEntries().filter(entry => entry.type === "thinking_level_change")).toHaveLength(
 			autoReceiptCount,
 		);
@@ -514,16 +515,17 @@ describe("AgentSession role model thinking behavior", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		sessionSettings = Settings.isolated();
-		cfgDefaultThinkingLevel.set(sessionSettings, AUTO_THINKING);
+		cfgDefaultThinkingLevel.set(sessionSettings, Effort.High);
 		session = new AgentSession({
 			agent,
 			sessionManager,
 			settings: sessionSettings,
 			modelRegistry,
-			thinkingLevel: AUTO_THINKING,
+			thinkingLevel: Effort.High,
 		});
 		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Medium);
+		session.setThinkingLevel(AUTO_THINKING);
 
 		await session.prompt("Implement a focused parser fix");
 
@@ -805,6 +807,29 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.model?.provider).toBe(temporaryModel.provider);
 		expect(session.model?.id).toBe(temporaryModel.id);
 		expect(session.thinkingLevel).toBe(Effort.High);
+	});
+	it("preserves thinking from a preset-only role in the temporary picker", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const temporaryModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+
+		await createSession({
+			initialModelId: defaultModel.id,
+			initialThinkingLevel: Effort.Low,
+			modelRoles: {},
+			runtimeApiKeys: {
+				[temporaryModel.provider]: "test-key",
+			},
+		});
+		cfgModelPresets.setEntry(sessionSettings, "custom", {
+			modelRoles: {
+				default: `${defaultModel.provider}/${defaultModel.id}`,
+				pickerOnly: `${temporaryModel.provider}/${temporaryModel.id}:high`,
+			},
+		});
+
+		await session.setActivePreset("custom", defaultModel, undefined);
+
+		expect(session.resolveTemporaryModelThinkingLevel(temporaryModel)).toBe(Effort.High);
 	});
 
 	it("ignores a stale recorded role and cycles from the active model", async () => {

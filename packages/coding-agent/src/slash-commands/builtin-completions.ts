@@ -3,8 +3,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir, logger } from "@oh-my-pi/pi-utils";
-import { formatModelRoleAlias, getKnownRoleIds } from "../config/model-roles";
-import { cfgCycleOrder } from "../config/model-settings";
+import { formatModelRoleAlias, getEffectiveKnownRoleIds } from "../config/model-roles";
+import { getModelPreset } from "../config/model-presets";
 import { readMCPConfigFile } from "../mcp/config-writer";
 import { collectMcpServerNames } from "../modes/controllers/mcp-command-controller";
 import { createModelBrowserSource } from "../modes/model-browser-source";
@@ -288,8 +288,16 @@ export function buildModelSelectorCompletions(
 		if (query.startsWith("@")) {
 			const { settings } = runtime.ctx;
 			const lower = query.toLowerCase();
-			for (const role of new Set([...cfgCycleOrder.get(settings), ...getKnownRoleIds(settings)])) {
-				const configured = settings.getModelRole(role);
+			const preset = runtime.ctx.session.activePreset
+				? getModelPreset(settings, runtime.ctx.session.activePreset)
+				: undefined;
+			const presetRoleKeys = preset?.kind === "found" ? Object.keys(preset.preset.modelRoles) : [];
+			for (const role of getEffectiveKnownRoleIds(
+				settings,
+				presetRoleKeys,
+				Object.keys(runtime.ctx.session.sessionRoleOverrides),
+			)) {
+				const configured = runtime.ctx.session.effectiveModelRole(role);
 				if (!configured) continue;
 				const alias = formatModelRoleAlias(role);
 				if (!alias.toLowerCase().includes(lower)) continue;
@@ -297,8 +305,13 @@ export function buildModelSelectorCompletions(
 			}
 		} else {
 			rankModels ??= createModelMentionSource({
-				source: createModelBrowserSource(runtime.ctx.settings, model =>
-					runtime.ctx.session.effectiveServiceTier(model),
+				source: createModelBrowserSource(
+					runtime.ctx.settings,
+					model => runtime.ctx.session.effectiveServiceTier(model),
+					() => runtime.ctx.session.activePreset,
+					role => runtime.ctx.session.effectiveModelRole(role),
+					() => runtime.ctx.session.effectiveDefaultThinkingLevel(),
+					() => runtime.ctx.session.sessionRoleOverrides,
 				),
 				registry: runtime.ctx.session.modelRegistry,
 				scopedModels: () => runtime.ctx.session.scopedModels.map(entry => entry.model),

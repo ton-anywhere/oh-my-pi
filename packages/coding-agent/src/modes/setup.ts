@@ -30,7 +30,14 @@ export { runStartupSplash } from "@oh-my-pi/pi-tui/setup/startup-splash";
 
 /** Bind application preferences and runtime effects to the setup presentation. */
 export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
-	const modelSource = createModelBrowserSource(ctx.settings, model => ctx.session.effectiveServiceTier(model));
+	const modelSource = createModelBrowserSource(
+		ctx.settings,
+		model => ctx.session.effectiveServiceTier(model),
+		() => ctx.session.activePreset,
+		role => ctx.session.effectiveModelRole(role),
+		() => ctx.session.effectiveDefaultThinkingLevel(),
+		() => ctx.session.sessionRoleOverrides,
+	);
 	return {
 		ui: ctx.ui,
 		get statusLine() {

@@ -34,6 +34,7 @@ import {
 	acquireModelRoleMutation,
 	applyModelPreset,
 	formatModelPresetSwitch,
+	getModelPreset,
 	isCleanModelPresetSwitch,
 	modelPresetSavedMessage,
 	saveModelPreset,
@@ -527,8 +528,13 @@ export class SelectorController {
 			const defaultAdvisorModel = advisorRoleSel?.model;
 			const deps: AdvisorConfigDeps = {
 				getAvailableModels: () => this.ctx.session.modelRegistry.getAvailable(),
-				browserSource: createModelBrowserSource(this.ctx.settings, model =>
-					this.ctx.session.effectiveServiceTier(model),
+				browserSource: createModelBrowserSource(
+					this.ctx.settings,
+					model => this.ctx.session.effectiveServiceTier(model),
+					() => this.ctx.session.activePreset,
+					role => this.ctx.session.effectiveModelRole(role),
+					() => this.ctx.session.effectiveDefaultThinkingLevel(),
+					() => this.ctx.session.sessionRoleOverrides,
 				),
 				defaultToolNames: ADVISOR_DEFAULT_TOOL_NAMES,
 				externalEditor: text => {
@@ -707,6 +713,10 @@ export class SelectorController {
 					activeModelPattern,
 					defaultModelPattern,
 					model => this.ctx.session.effectiveServiceTier(model),
+					() => this.ctx.session.activePreset,
+					role => this.ctx.session.effectiveModelRole(role),
+					() => this.ctx.session.effectiveDefaultThinkingLevel(),
+					() => this.ctx.session.sessionRoleOverrides,
 				),
 				{ onCancel: () => done() },
 			);
@@ -844,7 +854,14 @@ export class SelectorController {
 		const isCurrent = () => this.#openMenus.get(menuKind) === menu;
 		const picker = new ModelPickerComponent(
 			this.ctx.ui,
-			createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
+			createModelBrowserSource(
+				this.ctx.settings,
+				model => this.ctx.session.effectiveServiceTier(model),
+				() => this.ctx.session.activePreset,
+				role => this.ctx.session.effectiveModelRole(role),
+				() => this.ctx.session.effectiveDefaultThinkingLevel(),
+				() => this.ctx.session.sessionRoleOverrides,
+			),
 			this.ctx.session.modelRegistry,
 			this.ctx.session.scopedModels,
 			{
@@ -944,7 +961,14 @@ export class SelectorController {
 		};
 		const hub = new ModelHubComponent(
 			this.ctx.ui,
-			createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
+			createModelBrowserSource(
+				this.ctx.settings,
+				model => this.ctx.session.effectiveServiceTier(model),
+				() => this.ctx.session.activePreset,
+				role => this.ctx.session.effectiveModelRole(role),
+				() => this.ctx.session.effectiveDefaultThinkingLevel(),
+				() => this.ctx.session.sessionRoleOverrides,
+			),
 			this.ctx.session.modelRegistry,
 			this.ctx.session.scopedModels,
 			{
@@ -1042,7 +1066,7 @@ export class SelectorController {
 						configuredStorage === "project" ? `${targetScope === "project" ? "Project" : "Global"} ` : "";
 					try {
 						const previousEffectiveRoleValue =
-							role === "default" ? this.ctx.settings.getModelRole("default") : undefined;
+							role === "default" ? this.ctx.session.effectiveModelRole("default") : undefined;
 						if (targetScope === "project") {
 							this.ctx.settings.clearProjectModelRole(role);
 						} else {
@@ -1060,16 +1084,22 @@ export class SelectorController {
 						// writing it back to global settings. Overlay and runtime
 						// provenance remain authoritative and session-neutral.
 						if (role === "default") {
-							const fallbackRoleValue = this.ctx.settings.getModelRole("default");
+							const fallbackRoleValue = this.ctx.session.effectiveModelRole("default");
 							const fallbackProvenance = this.ctx.settings.getModelRoleProvenance("default");
 							const exposesPersistedFallback =
 								fallbackProvenance === "project" || fallbackProvenance === "global";
+							const activePreset = this.ctx.session.activePreset
+								? getModelPreset(this.ctx.settings, this.ctx.session.activePreset)
+								: undefined;
+							const presetOwnsRole =
+								activePreset?.kind === "found" && activePreset.preset.modelRoles.default !== undefined;
 							if (fallbackRoleValue && exposesPersistedFallback) {
 								const scopedModels = this.ctx.session.scopedModels.map(sm => sm.model);
 								const availableModels =
 									scopedModels.length > 0 ? scopedModels : this.ctx.session.getAvailableModels();
 								const resolved = resolveModelRoleValue(fallbackRoleValue, availableModels, {
 									settings: this.ctx.settings,
+									roleLookup: { getModelRole: roleName => this.ctx.session.effectiveModelRole(roleName) },
 								});
 								const live = this.ctx.session.model;
 								const liveDiffers =
@@ -1083,9 +1113,7 @@ export class SelectorController {
 									let concreteThinking = concreteThinkingLevel(resolved.thinkingLevel);
 									let isAutoFromDefault = false;
 									if (!resolved.explicitThinkingLevel && !concreteThinking) {
-										const defaultLevel = parseConfiguredThinkingLevel(
-											cfgDefaultThinkingLevel.get(this.ctx.settings),
-										);
+										const defaultLevel = this.ctx.session.effectiveDefaultThinkingLevel();
 										if (defaultLevel === AUTO_THINKING) {
 											isAutoFromDefault = true;
 										} else if (defaultLevel) {
@@ -1093,12 +1121,20 @@ export class SelectorController {
 										}
 									}
 									const effectiveIsAuto = isAuto || isAutoFromDefault;
-									const { switched } = await this.ctx.session.setModel(fallbackModel, "default", {
-										persist: false,
-										thinkingLevel: effectiveIsAuto
-											? ThinkingLevel.Inherit
-											: (concreteThinking ?? ThinkingLevel.Inherit),
-									});
+									let switched = true;
+									if (presetOwnsRole) {
+										await this.ctx.session.setModelTemporary(
+											fallbackModel,
+											effectiveIsAuto ? AUTO_THINKING : (concreteThinking ?? ThinkingLevel.Inherit),
+										);
+									} else {
+										({ switched } = await this.ctx.session.setModel(fallbackModel, "default", {
+											persist: false,
+											thinkingLevel: effectiveIsAuto
+												? ThinkingLevel.Inherit
+												: (concreteThinking ?? ThinkingLevel.Inherit),
+										}));
+									}
 									if (!switched) return;
 									if (effectiveIsAuto) {
 										this.ctx.session.setThinkingLevel(AUTO_THINKING, true);
@@ -1183,7 +1219,12 @@ export class SelectorController {
 					),
 				onSavePreset: name => {
 					try {
-						saveModelPreset(this.ctx.settings, name);
+						saveModelPreset(
+							this.ctx.settings,
+							name,
+							this.ctx.session.effectiveModelRoles(),
+							this.ctx.session.effectiveDefaultThinkingLevel(),
+						);
 						this.ctx.showStatus(modelPresetSavedMessage(this.ctx.settings, name));
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));

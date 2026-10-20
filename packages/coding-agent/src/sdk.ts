@@ -78,10 +78,13 @@ import {
 	resolveCliModel,
 	type ResolveCliModelResult,
 	resolveConfiguredModelPatterns,
+	expandRoleAlias,
 	resolveModelRoleValue,
 	resolveSessionModelSelector,
 	sessionModelDiscoveryProviders,
 } from "./config/model-resolver";
+import { getModelPreset, getModelPresetNames } from "./config/model-presets";
+import { CliUsageError } from "./cli/usage-error";
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { buildServiceTierByFamily } from "./config/service-tier";
@@ -252,7 +255,6 @@ import {
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
 	parseConfiguredThinkingLevel,
-	parseThinkingLevel,
 	resolveProvisionalAutoLevel,
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
@@ -605,6 +607,19 @@ export interface CreateAgentSessionOptions {
 	modelPatternFallbackRole?: string;
 	/** Validated default retry chain to install when a deferred singleton pattern resolves. */
 	modelPatternDefaultFallbackChain?: string[];
+	/**
+	 * Model preset name to start on (`--preset`): validated against the settings'
+	 * saved presets (unknown names fail startup), seeded as the session's active
+	 * preset before the preset overlay is built, and journaled as a
+	 * `preset_change` when it differs from the preset the session replayed.
+	 */
+	preset?: string;
+	/**
+	 * Explicit CLI role flags (--smol, --slow, --plan) as role → selector.
+	 * Session-scoped: outranks the active preset's roles for live and deferred
+	 * role resolution. Not persisted to the transcript.
+	 */
+	cliRoleOverrides?: Record<string, string>;
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
@@ -1988,6 +2003,53 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const hasThinkingEntry = existingBranch.some(entry => entry.type === "thinking_level_change");
 	const hasServiceTierEntry = existingBranch.some(entry => entry.type === "service_tier_change");
 
+	// An explicit `--preset` startup selection wins over any preset the session
+	// replayed. Validate it against the settings' saved presets (an unknown name
+	// is a hard startup error naming the available presets), then seed the
+	// replayed context so the overlay below and the constructed session both see
+	// it. Journal a `preset_change` only when it differs from the replayed
+	// preset so a bare resume does not append a redundant entry.
+	if (options.preset !== undefined) {
+		const presetLookup = getModelPreset(settings, options.preset);
+		if (presetLookup.kind !== "found") {
+			throw new CliUsageError(
+				`Unknown model preset "${options.preset}". Available presets: ${getModelPresetNames(settings).join(", ") || "(none)"}`,
+			);
+		}
+		if (existingSession.activePreset !== options.preset) {
+			sessionManager.appendPresetChange(options.preset);
+		}
+		existingSession.activePreset = options.preset;
+	}
+	// Explicit CLI role flags (--smol, --slow, --plan) are session-scoped: they
+	// outrank the active preset's roles for live and deferred role resolution, so
+	// seed them into the session overrides before the role lookup is built.
+	if (options.cliRoleOverrides) {
+		for (const [role, value] of Object.entries(options.cliRoleOverrides)) {
+			if (value !== undefined) {
+				existingSession.explicitRoleOverrides[role] = value;
+			}
+		}
+	}
+
+	// Session model presets: the active preset's roles are resolved on the fly
+	// (explicit session override → active preset role → base `modelRoles`); the
+	// session's `Settings` stays the durable base.
+	const sessionRoleOverrides = existingSession.explicitRoleOverrides;
+	const effectiveRole = (role: string): string | undefined => {
+		const override = sessionRoleOverrides[role];
+		if (override !== undefined) return override;
+		const presetName = existingSession.activePreset;
+		if (presetName) {
+			const preset = getModelPreset(settings, presetName);
+			if (preset.kind === "found" && preset.preset.modelRoles[role] !== undefined) {
+				return preset.preset.modelRoles[role];
+			}
+		}
+		return settings.getModelRole(role);
+	};
+	const effectiveRoleLookup = { getModelRole: effectiveRole };
+
 	const deferredModelPatterns = Array.isArray(options.modelPattern)
 		? options.modelPattern.map(pattern => pattern.trim()).filter(Boolean)
 		: options.modelPattern?.trim()
@@ -1995,10 +2057,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			: [];
 	const hasExplicitModel = options.model !== undefined || deferredModelPatterns.length > 0;
 	const modelMatchPreferences = getModelMatchPreferences(settings);
-	const defaultRoleValue = settings.getModelRole("default");
+	const defaultRoleValue = effectiveRole("default");
+	// The default-role value and lookup always consult the session-aware
+	// effective lookup (overrides -> active preset -> base), regardless of
+	// whether a preset is active: a CLI --slow/--smol/--plan override or an
+	// explicit session role must resolve even when no preset is in play.
+	const configuredDefaultRoleValue = defaultRoleValue;
+	const configuredDefaultRoleLookup = effectiveRoleLookup;
 	let explicitDefaultProviders: Set<string> | undefined;
 	if ((cfgEnabledModels.get(settings)?.length ?? 0) === 0) {
-		const patterns = resolveConfiguredModelPatterns(defaultRoleValue, settings);
+		const patterns = resolveConfiguredModelPatterns(defaultRoleValue, configuredDefaultRoleLookup);
 		if (patterns && patterns.length > 0) {
 			const providers = new Set<string>();
 			for (const pattern of patterns) {
@@ -2026,6 +2094,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		resolveModelRoleValue(defaultRoleValue, allowedModels, {
 			settings,
 			matchPreferences: modelMatchPreferences,
+			roleLookup: { getModelRole: effectiveRole },
 		}),
 	);
 	let model = options.model;
@@ -2036,10 +2105,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// host preconnect) can use the restored model; extension-registered
 	// providers aren't visible yet, so we retry the preferred candidates once
 	// extensions register below.
-	const sessionModelStrings =
+	let sessionModelStrings =
 		!hasExplicitModel && hasExistingSession
 			? getRestorableSessionModels(existingSession.models, sessionManager.getLastModelChangeRole())
 			: [];
+	if (!hasExplicitModel && existingSession.activePreset) {
+		// The preset's current definition decides the default model first; the
+		// journal receipts are the fallback when the def no longer resolves.
+		const presetDefault = effectiveRole("default");
+		if (presetDefault) {
+			sessionModelStrings = [presetDefault, ...sessionModelStrings.filter(s => s !== presetDefault)];
+		}
+	}
 	let restoredSessionModelIndex = -1;
 	let restoredSessionThinkingLevel: ConfiguredThinkingLevel | undefined;
 	if (!hasExplicitModel && !model && sessionModelStrings.length > 0) {
@@ -2047,7 +2124,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			let failedSessionModel: string | undefined;
 			for (let i = 0; i < sessionModelStrings.length; i++) {
 				const sessionModelStr = sessionModelStrings[i];
-				const restored = resolveSessionModelSelector(modelRegistry, sessionModelStr);
+				const restored = resolveSessionModelSelector(
+					modelRegistry,
+					expandRoleAlias(sessionModelStr, effectiveRoleLookup),
+				);
 				if (restored) {
 					model = restored.model;
 					restoredSessionModelIndex = i;
@@ -2077,22 +2157,27 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	// Resolves the session/agent thinking level using the same precedence we
 	// apply at startup: explicit option → persisted session entry → restored
-	// model selector suffix → default role's explicit selector → selected
-	// model's defaultLevel → global settings default. Run again after extension
-	// role reclaim so the final model's own defaults aren't masked by an earlier
-	// fallback model's.
+	// model selector suffix → default role's explicit selector → active preset
+	// defaultThinkingLevel → selected model's defaultLevel → global settings
+	// default. Run again after extension role reclaim so the final model's own
+	// defaults aren't masked by an earlier fallback model's.
 	const pickInitialThinkingLevel = (selectedModel: Model | undefined): ConfiguredThinkingLevel | undefined => {
 		let level = options.thinkingLevel;
 		if (level === undefined && hasExistingSession && hasThinkingEntry) {
-			level =
-				parseConfiguredThinkingLevel(existingSession.configuredThinkingLevel) ??
-				parseThinkingLevel(existingSession.thinkingLevel);
+			level = parseConfiguredThinkingLevel(existingSession.configuredThinkingLevel);
 		}
 		if (level === undefined && !hasThinkingEntry && restoredSessionThinkingLevel !== undefined) {
 			level = restoredSessionThinkingLevel;
 		}
 		if (level === undefined && !hasExplicitModel && !hasThinkingEntry && defaultRoleSpec.explicitThinkingLevel) {
 			level = defaultRoleSpec.thinkingLevel;
+		}
+		if (level === undefined) {
+			// The active preset's defaultThinkingLevel wins over the selected model's default.
+			const preset = existingSession.activePreset
+				? getModelPreset(settings, existingSession.activePreset)
+				: undefined;
+			level = preset?.kind === "found" ? preset.preset.defaultThinkingLevel : undefined;
 		}
 		if (level === undefined && selectedModel?.thinking?.defaultLevel !== undefined) {
 			level = selectedModel.thinking.defaultLevel;
@@ -2381,6 +2466,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getSessionAgents: () => session?.getSessionAgents() ?? [],
 			advertisedSessionAgents: () => session?.getAdvertisedSessionAgents() ?? [],
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
+			getEffectiveModelRole: role => session?.effectiveModelRole(role),
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
 			getServiceTierByFamily: () => session?.serviceTierByFamily,
@@ -2824,7 +2910,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (!hasExplicitModel && sessionRetryLimit > 0) {
 			const restoreSessionModel = (): boolean => {
 				for (let i = 0; i < sessionRetryLimit; i++) {
-					const restored = resolveSessionModelSelector(modelRegistry, sessionModelStrings[i]);
+					const restored = resolveSessionModelSelector(
+						modelRegistry,
+						expandRoleAlias(sessionModelStrings[i], effectiveRoleLookup),
+					);
 					if (restored) {
 						const restoredModel = restored.model;
 						model = restoredModel;
@@ -2851,7 +2940,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// in the SDK's startup background refresh.
 				const candidateProviders = sessionModelDiscoveryProviders(
 					modelRegistry,
-					sessionModelStrings.slice(0, sessionRetryLimit),
+					sessionModelStrings
+						.slice(0, sessionRetryLimit)
+						.map(selector => expandRoleAlias(selector, effectiveRoleLookup)),
 					disabledProviderIds(settings),
 				);
 				if (candidateProviders.size > 0) {
@@ -2902,6 +2993,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						cliModel: trimmedSelector,
 						modelRegistry,
 						settings,
+						roleLookup: effectiveRoleLookup,
 						preferences: matchPreferences,
 					});
 					// Only a concretely resolved model counts as a runtime match. A role
@@ -2937,6 +3029,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						cliModel: trimmedSelector,
 						modelRegistry,
 						settings,
+						roleLookup: effectiveRoleLookup,
 						preferences: matchPreferences,
 					});
 					if (resolved.configuredPatterns && resolved.configuredPatterns.length > 0) {
@@ -2955,7 +3048,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								...Object.keys(settings.getModelRoles()),
 								resolved.configuredRole,
 							]),
-							getModelRole: role => settings.getModelRole(role),
+							getModelRole: role => effectiveRole(role),
 							modelLookup: modelRegistry,
 						};
 						const originalSelector = resolved.configuredPatterns[0];
@@ -2998,7 +3091,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							},
 						];
 					}
-					return resolveConfiguredModelPatterns([trimmedSelector], settings).map(pattern => ({
+					return resolveConfiguredModelPatterns([trimmedSelector], effectiveRoleLookup).map(pattern => ({
 						pattern,
 						retryFallback: undefined,
 					}));
@@ -3201,8 +3294,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// Re-resolve the allowed set: extension factories and discovery
 				// refreshes above may have registered models not visible earlier.
 				const fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
-				const reResolvedRoleSpec = resolveModelRoleValue(settings.getModelRole("default"), fallbackCandidates, {
+				const reResolvedRoleSpec = resolveModelRoleValue(configuredDefaultRoleValue, fallbackCandidates, {
 					settings,
+					roleLookup: configuredDefaultRoleLookup,
 					matchPreferences: modelMatchPreferences,
 				});
 				if (!reResolvedRoleSpec.model) return false;
@@ -3310,7 +3404,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// so on a cache-cold boot the configured default stays unresolved.
 				// Await one cache-aware discovery pass before choosing either its
 				// configured retry fallback or an unrelated provider default.
-				const defaultRoleConfigured = Boolean(settings.getModelRole("default"));
+				const defaultRoleConfigured = Boolean(configuredDefaultRoleValue);
 				if (
 					!hasExplicitModel &&
 					(defaultRoleConfigured || !pick) &&
@@ -4578,15 +4672,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
 				);
 			}
+			if (options.thinkingLevel !== undefined) {
+				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, thinkingLevel, true);
+			}
 		} else {
 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
 			if (model) {
 				sessionManager.appendModelChange(`${model.provider}/${model.id}`);
 			}
-			if (!autoThinking) {
-				// Do not write the `auto` selector before the first turn resolves; auto
-				// classification persists its concrete effort once a real user turn runs.
-				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel);
+			if (!autoThinking || options.thinkingLevel !== undefined) {
+				// Initial model/preset defaults are automatic; an explicit CLI
+				// selector is marked so it wins on the next resume.
+				sessionManager.appendThinkingLevelChange(
+					effectiveThinkingLevel,
+					autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
+					options.thinkingLevel !== undefined,
+				);
 			}
 			if (persistInitialServiceTier || Object.keys(initialServiceTierByFamily).length > 0) {
 				sessionManager.appendServiceTierChange(
@@ -4693,6 +4794,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
 			settings,
+			activePreset: existingSession.activePreset,
+			sessionRoleOverrides: existingSession.explicitRoleOverrides,
 			additionalExtensionPaths: options.additionalExtensionPaths,
 			extensionRoots: buildSessionExtensionRoots,
 			preparedExtensions: extensionsResult.preparedExtensions,

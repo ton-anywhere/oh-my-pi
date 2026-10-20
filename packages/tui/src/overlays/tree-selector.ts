@@ -31,6 +31,7 @@ export type SessionTreeEntry = { id: string; parentId: string | null } & (
 	| { type: "compaction"; tokensBefore: number }
 	| { type: "branch_summary"; summary: string }
 	| { type: "model_change"; model: string }
+	| { type: "preset_change"; preset: string }
 	| { type: "model_usage"; purpose: string; role?: string; provider: string; model: string }
 	| { type: "thinking_level_change"; thinkingLevel?: string | null }
 	| { type: "custom"; customType: string }
@@ -511,6 +512,7 @@ class TreeList implements Component {
 				entry.type === "label" ||
 				entry.type === "custom" ||
 				entry.type === "model_change" ||
+				entry.type === "preset_change" ||
 				entry.type === "model_usage" ||
 				entry.type === "thinking_level_change" ||
 				entry.type === "service_tier_change" ||
@@ -607,6 +609,9 @@ class TreeList implements Component {
 				break;
 			case "model_change":
 				parts.push("model", entry.model);
+				break;
+			case "preset_change":
+				parts.push("preset", entry.preset);
 				break;
 			case "model_usage":
 				parts.push(
@@ -1123,6 +1128,8 @@ class TreeList implements Component {
 				return [{ t: `[branch summary]: `, s: "warning" }, { t: normalize(entry.summary) }];
 			case "model_change":
 				return [{ t: `[model: ${entry.model}]`, s: "dim" }];
+			case "preset_change":
+				return [{ t: `[preset: ${entry.preset}]`, s: "dim" }];
 			case "model_usage": {
 				const purpose = sanitizeTreeField(entry.purpose);
 				const role = sanitizeTreeField(entry.role ?? "");
