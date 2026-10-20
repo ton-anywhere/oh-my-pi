@@ -26,6 +26,11 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	role?: string;
 }
 
+export interface PresetChangeEntry extends SessionEntryBase {
+	type: "preset_change";
+	preset: string;
+}
+
 export interface ServiceTierChangeEntry extends SessionEntryBase {
 	type: "service_tier_change";
 	serviceTier: ServiceTierByFamily | null;
@@ -135,6 +140,7 @@ export type SessionEntry =
 	| SessionMessageEntry
 	| ThinkingLevelChangeEntry
 	| ModelChangeEntry
+	| PresetChangeEntry
 	| ServiceTierChangeEntry
 	| CompactionEntry
 	| BranchSummaryEntry

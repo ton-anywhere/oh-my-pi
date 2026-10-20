@@ -1,8 +1,8 @@
 import { type Model, resolveModelServiceTier, type ServiceTier, shouldSendServiceTier } from "@oh-my-pi/pi-ai";
 import type { ModelHubSource } from "@oh-my-pi/pi-tui/overlays/model-hub";
-import { findActiveModelPreset, getModelPresetNames } from "../config/model-presets";
+import { findActiveModelPreset, getModelPreset, getModelPresetNames } from "../config/model-presets";
 import { resolveModelRoleValue, rolePriorityDefaults } from "../config/model-resolver";
-import { getKnownRoleIds, getRoleInfo } from "../config/model-roles";
+import { getEffectiveKnownRoleIds, getRoleInfo } from "../config/model-roles";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { describeModelCompactionPoint } from "../session/model-compaction-threshold";
@@ -20,6 +20,7 @@ import {
 	cfgTierGoogle,
 	cfgTierOpenai,
 } from "../session/settings";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 
 /**
  * Supply live model-overlay preferences and runtime resolution from the host.
@@ -27,23 +28,35 @@ import {
  * @param sessionServiceTier - The live session's effective tier for a model
  *   (`/fast`, `/fast ultra`, `/slow`, resumed tiers). Omit only where no session
  *   exists; the configured `tier.*` settings stand in then.
+ * @param activePreset - The live session's active preset, for the hub's active
+ *   marker. Omit to fall back to `findActiveModelPreset(settings)`.
+ * @param effectiveModelRole - The live session's effective role selectors
+ *   (explicit override → active preset → base). Omit only where no session
+ *   exists; the base `modelRoles` stand in then.
  */
 export function createModelBrowserSource(
 	settings: Settings,
 	sessionServiceTier?: (model: Model) => ServiceTier | undefined,
+	activePreset?: () => string | undefined,
+	effectiveModelRole?: (role: string) => string | undefined,
+	effectiveDefaultThinkingLevel?: () => ConfiguredThinkingLevel | undefined,
+	sessionRoleOverrides?: () => Readonly<Record<string, string>>,
 ): ModelHubSource {
 	return {
 		get revision() {
 			return settings.revision;
 		},
 		get defaultThinkingLevel() {
-			return cfgDefaultThinkingLevel.get(settings);
+			return effectiveDefaultThinkingLevel?.() ?? cfgDefaultThinkingLevel.get(settings);
 		},
 		get modelProviderOrder() {
 			return cfgModelProviderOrder.get(settings);
 		},
 		get knownRoleIds() {
-			return getKnownRoleIds(settings);
+			const presetName = activePreset?.();
+			const preset = presetName ? getModelPreset(settings, presetName) : undefined;
+			const presetRoleKeys = preset?.kind === "found" ? Object.keys(preset.preset.modelRoles) : [];
+			return getEffectiveKnownRoleIds(settings, presetRoleKeys, Object.keys(sessionRoleOverrides?.() ?? {}));
 		},
 		get mruOrder() {
 			return settings.getStorage()?.getModelUsageOrder() ?? [];
@@ -78,14 +91,24 @@ export function createModelBrowserSource(
 		get cycleOrder() {
 			return cfgCycleOrder.get(settings);
 		},
-		getModelRole: role => settings.getModelRole(role),
+		getModelRole: role => effectiveModelRole?.(role) ?? settings.getModelRole(role),
 		getProjectModelRole: role => settings.getProjectModelRole(role),
 		getGlobalModelRole: role => settings.getGlobalModelRole(role),
 		getModelRoleSource: role => settings.getModelRoleSource(role),
 		getRoleInfo: role => getRoleInfo(role, settings),
 		defaultRoleChain: role => rolePriorityDefaults(role),
-		resolveRoleValue: (value, models, roleLookup) => resolveModelRoleValue(value, models, { settings, roleLookup }),
-		getModelPresets: () => ({ names: getModelPresetNames(settings), active: findActiveModelPreset(settings) }),
+		resolveRoleValue: (value, models, roleLookup) =>
+			resolveModelRoleValue(value, models, {
+				settings,
+				roleLookup: roleLookup ?? (effectiveModelRole ? { getModelRole: effectiveModelRole } : undefined),
+			}),
+		getModelPresets: () => ({
+			names: getModelPresetNames(settings),
+			active: activePreset ? activePreset() : findActiveModelPreset(settings),
+		}),
+		get activePreset() {
+			return activePreset?.();
+		},
 		compactionPointFor: model => describeModelCompactionPoint(settings, model),
 	};
 }

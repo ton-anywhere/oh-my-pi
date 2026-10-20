@@ -279,6 +279,7 @@ describe("EventController mixed assistant text/tool rendering", () => {
 		rebuiltHelpers.renderSessionContext({
 			messages: [streaming],
 			models: {},
+			explicitRoleOverrides: {},
 			injectedTtsrRules: [],
 			mode: "none",
 		});
