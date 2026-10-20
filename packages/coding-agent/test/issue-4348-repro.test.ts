@@ -46,6 +46,7 @@ function transcriptWith(messages: AgentMessage[]): SessionContext {
 		thinkingLevel: "off",
 		serviceTier: undefined,
 		models: {},
+		explicitRoleOverrides: {},
 		injectedTtsrRules: [],
 		mode: "none",
 	};

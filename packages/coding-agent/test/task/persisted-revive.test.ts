@@ -234,7 +234,9 @@ function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptio
 	return createPersistedSubagentReviverFactory({
 		session: parentSession,
 		authStorage: owner.authStorage ?? ({} as never),
-		modelRegistry: owner.modelRegistry ?? ({ authStorage: {} } as ModelRegistry),
+		modelRegistry:
+			owner.modelRegistry ??
+			({ authStorage: {}, getDiscoveryProviderId: () => undefined } as unknown as ModelRegistry),
 		settings: owner.settings ?? Settings.isolated(),
 		enableLsp: true,
 		eventBus,
@@ -1283,6 +1285,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 				getAvailable: () => [],
 				find: () => agent.state.model,
 				hasConfiguredAuth: () => true,
+				getDiscoveryProviderId: () => undefined,
 			} as never,
 			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 			extensionRunner: {
@@ -1346,7 +1349,10 @@ describe("cold revival replays the system prompt the last request sent", () => {
 			index: 0,
 			id: "prompt-blocks",
 			settings: Settings.isolated(),
-			modelRegistry: { refresh: async () => {} } as unknown as ModelRegistry,
+			modelRegistry: {
+				refresh: async () => {},
+				getDiscoveryProviderId: () => undefined,
+			} as unknown as ModelRegistry,
 			enableLsp: false,
 			artifactsDir: cwd,
 		});
@@ -1623,7 +1629,10 @@ describe("cold revival replays the system prompt the last request sent", () => {
 			index: 0,
 			id: "prompt-blocks",
 			settings: Settings.isolated(),
-			modelRegistry: { refresh: async () => {} } as unknown as ModelRegistry,
+			modelRegistry: {
+				refresh: async () => {},
+				getDiscoveryProviderId: () => undefined,
+			} as unknown as ModelRegistry,
 			enableLsp: false,
 			sessionFile: parentFile,
 			artifactsDir: childrenDir,

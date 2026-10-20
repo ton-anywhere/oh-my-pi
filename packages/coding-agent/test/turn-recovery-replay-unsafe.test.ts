@@ -82,6 +82,7 @@ function createHost(
 		modelRegistry,
 		configWarnings: [],
 		model: () => model,
+		effectiveModelRole: (role: string) => settings.getModelRole(role),
 		contextFitsModel: () => true,
 		textOutputCommitted: () => options.textOutputCommitted !== false,
 		thinkingLevel: () => undefined,

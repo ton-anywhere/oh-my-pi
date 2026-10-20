@@ -104,6 +104,7 @@ describe("async speculative compaction", () => {
 			providerSessionState: new Map(),
 			preferWebsockets: () => undefined,
 			model: () => model,
+			effectiveModelRole: (role: string) => settings.getModelRole(role),
 			thinkingLevel: () => undefined,
 			isDisposed: () => false,
 			isStreaming: () => false,
