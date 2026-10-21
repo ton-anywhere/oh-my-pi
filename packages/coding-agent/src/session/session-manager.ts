@@ -63,6 +63,7 @@ import {
 	type ModelUsageEntry,
 	lastSelfSelectedLeafId,
 	type NewSessionOptions,
+	type PresetChangeEntry,
 	type ResetBoundaryEntry,
 	type ServiceTierChangeEntry,
 	sessionEntryLeafId,
@@ -500,6 +501,7 @@ function isDraftOnlyMetadataEntry(entry: SessionEntry): boolean {
 	switch (entry.type) {
 		case "model_change":
 		case "thinking_level_change":
+		case "preset_change":
 		case "service_tier_change":
 		case "mode_change":
 		case "credential_pin":
@@ -3493,12 +3495,13 @@ export class SessionManager {
 	}
 
 	/** Append a thinking level change as child of current leaf, then advance leaf. Returns entry id. */
-	appendThinkingLevelChange(thinkingLevel?: string, configured?: string): string {
+	appendThinkingLevelChange(thinkingLevel?: string, configured?: string, explicit = false): string {
 		const entry: ThinkingLevelChangeEntry = {
 			type: "thinking_level_change",
 			...this.#freshEntryFields(),
 			thinkingLevel: thinkingLevel ?? null,
 			configured: configured ?? null,
+			explicit,
 		};
 		this.#recordEntry(entry);
 		return entry.id;
@@ -3521,14 +3524,26 @@ export class SessionManager {
 	 * @param model Model in "provider/modelId" format
 	 * @param role Optional role (default: "default")
 	 * @param resolvedModelIsFallback Whether this transition selected a retry-fallback model
+	 * @param explicit Whether the user explicitly selected this role's model (vs. an automatic receipt)
 	 */
-	appendModelChange(model: string, role?: string, resolvedModelIsFallback = false): string {
+	appendModelChange(model: string, role?: string, resolvedModelIsFallback = false, explicit = false): string {
 		const entry: ModelChangeEntry = {
 			type: "model_change",
 			...this.#freshEntryFields(),
 			model,
 			role,
 			resolvedModelIsFallback,
+			...(explicit ? { explicit: true } : {}),
+		};
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
+	appendPresetChange(preset: string): string {
+		const entry: PresetChangeEntry = {
+			type: "preset_change",
+			...this.#freshEntryFields(),
+			preset,
 		};
 		this.#recordEntry(entry);
 		return entry.id;

@@ -130,6 +130,8 @@ export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 	 * before auto-mode persistence existed; readers fall back to `thinkingLevel`.
 	 */
 	configured?: string | null;
+	/** True when this thinking selector was explicitly chosen by the user or CLI. */
+	explicit?: boolean;
 }
 
 export interface ModelChangeEntry extends SessionEntryBase {
@@ -138,8 +140,15 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	model: string;
 	/** Role: "default", "smol", "slow", etc. Undefined treated as "default" */
 	role?: string;
+	/** True when the user explicitly selected this role's model (vs. an automatic receipt). */
+	explicit?: boolean;
 	/** True when this transition selected a retry-fallback model rather than the configured model. */
 	resolvedModelIsFallback?: boolean;
+}
+
+export interface PresetChangeEntry extends SessionEntryBase {
+	type: "preset_change";
+	preset: string;
 }
 
 export interface ServiceTierChangeEntry extends SessionEntryBase {
@@ -336,6 +345,7 @@ export type SessionEntry =
 	| ModelUsageEntry
 	| ThinkingLevelChangeEntry
 	| ModelChangeEntry
+	| PresetChangeEntry
 	| ServiceTierChangeEntry
 	| CompactionEntry
 	| BranchSummaryEntry
