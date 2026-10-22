@@ -650,6 +650,7 @@
 ### Added
 
 - Added `supportsThinkingBindingControls` to Bedrock `compat` in `models.yml`, so a Bedrock gateway or region that rejects Claude thinking-binding controls can turn them off ([#15316](https://github.com/can1357/oh-my-pi/pull/15316) by [@harshaygadekar](https://github.com/harshaygadekar))
+- Added per-session model presets: `--preset <name>` starts a session on a saved preset, the model hub switches the active preset per session without writing shared config (so concurrent sessions each keep their own preset), a resumed session returns to its preset, and the hub marks the active one.
 
 ## [18.9.0] - 2026-10-11
 

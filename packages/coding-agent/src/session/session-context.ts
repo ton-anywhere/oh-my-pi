@@ -109,11 +109,15 @@ export function snapcompactHistoryBlockOptions(
 export interface SessionContext {
 	messages: AgentMessage[];
 	thinkingLevel?: string;
-	/** Configured thinking selector (`"auto"` or a concrete level) from the latest change. */
+	/** Configured thinking selector from the latest explicit change; automatic receipts are ignored. */
 	configuredThinkingLevel?: string;
 	serviceTier?: ServiceTierByFamily;
 	/** Model roles: { default: "provider/modelId", small: "provider/modelId", ... } */
 	models: Record<string, string>;
+	/** Explicit user role selectors from `model_change` entries (last wins per role); automatic receipts are excluded. */
+	explicitRoleOverrides: Record<string, string>;
+	/** Active model preset from the latest change on the active branch. */
+	activePreset?: string;
 	/** Names of TTSR rules that have been injected this session */
 	injectedTtsrRules: string[];
 	/** Active mode (e.g. "plan") or "none" if no special mode is active */
@@ -258,6 +262,8 @@ export function buildSessionContext(
 			thinkingLevel: "off",
 			serviceTier: undefined,
 			models: {},
+			explicitRoleOverrides: {},
+			activePreset: undefined,
 			injectedTtsrRules: [],
 			mode: "none",
 		};
@@ -274,6 +280,8 @@ export function buildSessionContext(
 			thinkingLevel: "off",
 			serviceTier: undefined,
 			models: {},
+			explicitRoleOverrides: {},
+			activePreset: undefined,
 			injectedTtsrRules: [],
 			mode: "none",
 		};
@@ -296,6 +304,11 @@ export function buildSessionContext(
 	let configuredThinkingLevel: string | undefined;
 	let serviceTier: ServiceTierByFamily | undefined;
 	const models: Record<string, string> = {};
+	// Explicit user role selections only: automatic receipts (initial model,
+	// preset switches) stay in `models` for restore fallbacks but must not pin
+	// preset-backed roles on resume.
+	const explicitRoleOverrides: Record<string, string> = {};
+	let activePreset: string | undefined;
 	let compaction: CompactionEntry | null = null;
 	const injectedTtsrRulesSet = new Set<string>();
 	let mode = "none";
@@ -312,16 +325,23 @@ export function buildSessionContext(
 	for (const entry of path) {
 		if (entry.type === "thinking_level_change") {
 			thinkingLevel = entry.thinkingLevel ?? "off";
-			configuredThinkingLevel = entry.configured ?? entry.thinkingLevel ?? undefined;
+			if (entry.explicit !== false) {
+				configuredThinkingLevel = entry.configured ?? entry.thinkingLevel ?? undefined;
+			}
 		} else if (entry.type === "model_change") {
 			// New format: { model: "provider/id", role?: string }
 			if (entry.model) {
 				const role = entry.role ?? "default";
 				models[role] = entry.model;
+				if (entry.explicit) {
+					explicitRoleOverrides[role] = entry.model;
+				}
 				if (role === "default") {
 					hasExplicitDefaultModel = true;
 				}
 			}
+		} else if (entry.type === "preset_change") {
+			activePreset = entry.preset;
 		} else if (entry.type === "service_tier_change") {
 			serviceTier = coerceServiceTierByFamily(entry.serviceTier);
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
@@ -771,6 +791,8 @@ export function buildSessionContext(
 		configuredThinkingLevel,
 		serviceTier,
 		models,
+		explicitRoleOverrides,
+		activePreset,
 		injectedTtsrRules,
 		mode,
 		modeData,

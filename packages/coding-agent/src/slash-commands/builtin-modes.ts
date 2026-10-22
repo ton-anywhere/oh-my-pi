@@ -68,6 +68,7 @@ function resolveSessionModelSelector(
 		modelRegistry: session.modelRegistry,
 		availableModels: scoped.length > 0 ? scoped : undefined,
 		settings,
+		roleLookup: { getModelRole: role => session.effectiveModelRole(role) },
 		preferences: getModelMatchPreferences(settings),
 	});
 }
@@ -474,7 +475,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					);
 				}
 				try {
-					await runtime.session.setModel(match);
+					await runtime.session.setModel(match, "default", { selector });
 					if (resolved.thinkingLevel !== undefined) runtime.session.setThinkingLevel(resolved.thinkingLevel);
 					await runtime.output(`Model set to ${match.provider}/${match.id}.`);
 					await runtime.notifyTitleChanged?.();
@@ -966,7 +967,7 @@ async function runPresetsCommand(
 					usage: true,
 				};
 			}
-			saveModelPreset(settings, name);
+			saveModelPreset(settings, name, session.effectiveModelRoles(), session.effectiveDefaultThinkingLevel());
 			return { message: modelPresetSavedMessage(settings, name), changedConfig: true };
 		}
 		case "switch": {

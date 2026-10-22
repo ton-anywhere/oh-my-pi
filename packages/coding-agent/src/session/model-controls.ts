@@ -25,7 +25,6 @@ import {
 	type ResolvedModelRoleValue,
 	resolveModelRoleValue,
 } from "../config/model-resolver";
-import { getKnownRoleIds } from "../config/model-roles";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
@@ -61,6 +60,11 @@ import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings
 export interface ModelControlsHost {
 	agent: Agent;
 	settings: Settings;
+	/** The session's effective selector for `role`: explicit override → active preset → base settings. */
+	effectiveModelRole(role: string): string | undefined;
+	/** Effective built-in, preset, and explicit session roles for selector scans. */
+	getEffectiveKnownRoleIds(): readonly string[];
+	setSessionRoleOverride(role: string, selector: string): void;
 	modelRegistry: ModelRegistry;
 	sessionManager: SessionManager;
 	providerSessionState: Map<string, ProviderSessionState>;
@@ -202,12 +206,15 @@ export class ModelControls {
 		this.#serviceTierByFamily = tiers;
 	}
 	resolveRoleModel(role: string): Model | undefined {
-		return resolveRoleModelFull(this.#host.settings, role, this.#host.modelRegistry.getAvailable(), this.#model)
-			.model;
+		return resolveRoleModelFull(this.#host.settings, role, this.#host.modelRegistry.getAvailable(), this.#model, {
+			getModelRole: r => this.#host.effectiveModelRole(r),
+		}).model;
 	}
 
 	resolveRoleModelWithThinking(role: string): ResolvedModelRoleValue {
-		return resolveRoleModelFull(this.#host.settings, role, this.#host.modelRegistry.getAvailable(), this.#model);
+		return resolveRoleModelFull(this.#host.settings, role, this.#host.modelRegistry.getAvailable(), this.#model, {
+			getModelRole: r => this.#host.effectiveModelRole(r),
+		});
 	}
 
 	resolveTemporaryModelThinkingLevel(model: Model): ConfiguredThinkingLevel | undefined {
@@ -215,12 +222,13 @@ export class ModelControls {
 		if (availableModels.length === 0) return undefined;
 
 		const matchPreferences = getModelMatchPreferences(this.#host.settings);
-		for (const role of getKnownRoleIds(this.#host.settings)) {
-			const roleValue = this.#host.settings.getModelRole(role);
+		for (const role of this.#host.getEffectiveKnownRoleIds()) {
+			const roleValue = this.#host.effectiveModelRole(role);
 			if (!roleValue) continue;
 
 			const resolved = resolveModelRoleValue(roleValue, availableModels, {
 				settings: this.#host.settings,
+				roleLookup: { getModelRole: role => this.#host.effectiveModelRole(role) },
 				matchPreferences,
 			});
 			if (!resolved.explicitThinkingLevel || resolved.thinkingLevel === undefined || !resolved.model) continue;
@@ -249,7 +257,6 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(targetModel);
-		this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
 		if (options?.persist) {
 			this.#host.settings.setModelRole(
 				role,
@@ -262,6 +269,17 @@ export class ModelControls {
 					options.thinkingLevel,
 				),
 			);
+			// A persisted selection is still this session's model: record the
+			// receipt so resume restores it instead of the previous selection.
+			// Not marked explicit: a durable selection must not become a session
+			// override that shadows later preset switches on replay.
+			this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role, false);
+		} else {
+			// Session-local explicit selection: record the user's selector (or the
+			// resolved id when none was given) as a tier-1 override so live
+			// re-resolution and resume see it. Automatic receipts (initial model,
+			// preset switches) never route through here.
+			this.#host.setSessionRoleOverride(role, options?.selector ?? `${targetModel.provider}/${targetModel.id}`);
 		}
 		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
 
@@ -298,13 +316,15 @@ export class ModelControls {
 		this.#host.sessionManager.appendModelChange(
 			`${targetModel.provider}/${targetModel.id}`,
 			options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
+			false,
+			selection === "explicit",
 		);
 		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
 
 		// Apply explicit thinking level if given; otherwise prefer the model's
 		// configured defaultLevel; otherwise re-clamp the current level (or auto).
 		if (thinkingLevel !== undefined) {
-			this.setThinkingLevel(thinkingLevel);
+			this.setThinkingLevel(thinkingLevel, false, selection === "explicit");
 		} else {
 			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
 		}
@@ -346,12 +366,13 @@ export class ModelControls {
 		for (const role of roleOrder) {
 			const roleModelStr =
 				role === "default"
-					? (this.#host.settings.getModelRole("default") ?? `${currentModel.provider}/${currentModel.id}`)
-					: this.#host.settings.getModelRole(role);
+					? (this.#host.effectiveModelRole("default") ?? `${currentModel.provider}/${currentModel.id}`)
+					: this.#host.effectiveModelRole(role);
 			if (!roleModelStr) continue;
 
 			const resolved = resolveModelRoleValue(roleModelStr, availableModels, {
 				settings: this.#host.settings,
+				roleLookup: { getModelRole: role => this.#host.effectiveModelRole(role) },
 				matchPreferences,
 			});
 			if (!resolved.model) continue;
@@ -389,7 +410,11 @@ export class ModelControls {
 	 * settings. Shared with role cycling and the plan-approval model slider.
 	 */
 	async applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
-		await this.setModel(entry.model, entry.role);
+		const selector =
+			entry.explicitThinkingLevel && entry.thinkingLevel !== undefined
+				? `${formatModelStringWithRouting(entry.model)}:${entry.thinkingLevel}`
+				: undefined;
+		await this.setModel(entry.model, entry.role, selector ? { selector } : undefined);
 		if (entry.explicitThinkingLevel && entry.thinkingLevel !== undefined) {
 			this.setThinkingLevel(entry.thinkingLevel);
 		}
@@ -455,11 +480,11 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(next.model);
-		this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
+		this.#host.setSessionRoleOverride("default", formatModelStringWithRouting(next.model));
 		this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
 
 		// Apply the scoped model's configured thinking level, preserving auto.
-		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel);
+		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel, false, false);
 		await this.#host.syncAfterModelChange(previousEditMode);
 
 		return { model: next.model, thinkingLevel: this.thinkingLevel, isScoped: true };
@@ -482,11 +507,11 @@ export class ModelControls {
 		if (!apiKey) {
 			throw new Error(`No API key for ${nextModel.provider}/${nextModel.id}`);
 		}
-
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(nextModel);
-		this.#host.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
+
+		this.#host.setSessionRoleOverride("default", formatModelStringWithRouting(nextModel));
 		this.#host.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
 		// Re-apply the current thinking level (or auto) for the newly selected model
 		this.#reapplyThinkingLevel();
@@ -521,7 +546,11 @@ export class ModelControls {
 	 * giving external readers an authoritative selection receipt before the next
 	 * user turn. Later classifications persist only changed concrete resolutions.
 	 */
-	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
+	setThinkingLevel(
+		level: ConfiguredThinkingLevel | undefined,
+		persist: boolean = false,
+		explicit: boolean = true,
+	): void {
 		if (level === AUTO_THINKING) {
 			const provisional = clampThinkingLevelToCeiling(
 				this.#model,
@@ -540,9 +569,9 @@ export class ModelControls {
 			if (persist) {
 				cfgDefaultThinkingLevel.set(this.#host.settings, AUTO_THINKING);
 			}
-			const isChanging = !wasAuto || previousLevel !== provisional;
+			const isChanging = !wasAuto || explicit || previousLevel !== provisional;
 			if (isChanging) {
-				this.#host.sessionManager.appendThinkingLevelChange(provisional, AUTO_THINKING);
+				this.#host.sessionManager.appendThinkingLevelChange(provisional, AUTO_THINKING, explicit);
 				this.#host.emit({ type: "thinking_level_changed", thinkingLevel: provisional, configured: AUTO_THINKING });
 			}
 			return;
@@ -558,21 +587,23 @@ export class ModelControls {
 		// Leaving auto must persist even when the resolved effort is unchanged (e.g.
 		// auto resolved to medium, then the user pins medium): otherwise the latest
 		// session entry keeps `configured: "auto"` and resume re-enables auto.
-		const isChanging = wasAuto || effectiveLevel !== this.#thinkingLevel;
+		// An explicit selection pins the effort even when the resolved value is
+		// unchanged (re-selecting the current effort): record it so a later
+		// preset edit does not silently overwrite the user's choice.
+		const isChanging = wasAuto || explicit || effectiveLevel !== this.#thinkingLevel;
 
 		this.#thinkingLevel = effectiveLevel;
 		this.#applyThinkingLevelToAgent(effectiveLevel);
 
 		if (isChanging) {
 			this.#host.clearInheritedProviderPromptCacheKey();
-			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel);
+			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel, explicit);
 			if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
 				cfgDefaultThinkingLevel.set(this.#host.settings, effectiveLevel);
 			}
 			this.#host.emit({ type: "thinking_level_changed", thinkingLevel: effectiveLevel });
 		}
 	}
-
 	/**
 	 * Re-apply the active thinking selection after a model change. Preserves `auto`
 	 * (re-clamping the provisional level to the new model); otherwise re-applies the
@@ -583,6 +614,8 @@ export class ModelControls {
 			this.#autoThinking
 				? AUTO_THINKING
 				: automaticThinkingLevel(this.#model, preferredDefault ?? this.#thinkingLevel),
+			false,
+			false,
 		);
 	}
 
@@ -690,7 +723,7 @@ export class ModelControls {
 		this.#thinkingLevel = effort;
 		this.#applyThinkingLevelToAgent(effort);
 		if (shouldPersistResolution) {
-			this.#host.sessionManager.appendThinkingLevelChange(effort, AUTO_THINKING);
+			this.#host.sessionManager.appendThinkingLevelChange(effort, AUTO_THINKING, false);
 		}
 		this.#host.emit({
 			type: "thinking_level_changed",
