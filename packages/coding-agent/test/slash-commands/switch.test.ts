@@ -28,6 +28,7 @@ function createRuntime() {
 				settings,
 				session: {
 					scopedModels: [],
+					effectiveModelRole: (role: string) => settings.getModelRole(role),
 					modelRegistry: { getAll: () => MODELS, getAvailable: () => MODELS },
 				},
 				showModelSelector,

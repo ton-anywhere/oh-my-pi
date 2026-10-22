@@ -91,6 +91,7 @@ async function createFixture(overrides?: Partial<Record<string, unknown>>): Prom
 		settings,
 		model,
 		modelRegistry,
+		effectiveModelRole: (role: string) => settings.getModelRole(role),
 		refreshBaseSystemPrompt,
 	};
 

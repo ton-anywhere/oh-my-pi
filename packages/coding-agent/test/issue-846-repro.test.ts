@@ -29,6 +29,7 @@ interface SessionLike {
 	};
 	settings: Settings;
 	model: Model;
+	effectiveModelRole: (role: string) => string | undefined;
 	modelRegistry: ModelRegistryLike;
 	refreshBaseSystemPrompt: () => Promise<undefined>;
 }
@@ -113,6 +114,7 @@ describe("issue #846: phase1 stage1 failures must be logged", () => {
 			},
 			settings,
 			model,
+			effectiveModelRole: (role: string) => settings.getModelRole(role),
 			modelRegistry,
 			refreshBaseSystemPrompt: vi.fn(async () => undefined),
 		};

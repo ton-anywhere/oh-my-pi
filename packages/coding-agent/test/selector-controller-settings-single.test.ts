@@ -56,6 +56,7 @@ function pickerContext(ui: OverlayUi, models: Model[] = [], current?: Model, set
 		session: {
 			model: current,
 			scopedModels: [],
+			effectiveModelRole: (role: string) => settings?.getModelRole(role),
 			getContextUsage: () => undefined,
 			effectiveServiceTier: () => undefined,
 			getRoleModelCycle: () => undefined,
