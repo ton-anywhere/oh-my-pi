@@ -35,6 +35,11 @@ export interface SessionTitleSlotEntry {
 
 export const EPHEMERAL_MODEL_CHANGE_ROLE = "fallback";
 
+export interface SessionRepository {
+	sessionWorktreeRoot: string;
+	primaryWorktreeRoot: string;
+}
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this
@@ -61,6 +66,7 @@ export interface SessionHeader {
 	 * source: `history://`, `artifact://`, and `agent://` read them from there.
 	 */
 	seanceSource?: string;
+	repository?: SessionRepository;
 }
 
 export interface NewSessionOptions {
