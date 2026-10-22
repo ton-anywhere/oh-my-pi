@@ -128,6 +128,7 @@ describe("subagent runtime model resolution", () => {
 					sessionManager: { getSessionId: () => "literal-model" },
 					settings: Settings.isolated({}),
 					modelRegistry: {},
+					effectiveModelRole: () => undefined,
 					configWarnings: [],
 				} as unknown as TurnRecoveryHost);
 				const session = createYieldingSession("none", async () => {
@@ -195,6 +196,7 @@ describe("subagent runtime model resolution", () => {
 					hasProvider: () => true,
 					getAvailable: () => [primary, fallback],
 				},
+				effectiveModelRole: (roleName: string) => options.settings?.getModelRole(roleName),
 				configWarnings: [],
 			} as unknown as TurnRecoveryHost);
 			return {

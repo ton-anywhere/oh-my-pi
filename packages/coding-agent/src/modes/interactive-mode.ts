@@ -150,6 +150,7 @@ import { HistoryStorage } from "../session/history-storage";
 import { syncTextPrediction, textPredictionBackend } from "../predict/client";
 import { setWordPredictionHost } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
+import { resolveRoleModelFull } from "../session/role-models";
 import { resolveMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
 import type { ResolveContext } from "../internal-urls/index";
 import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
@@ -3862,8 +3863,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!this.sessionManager.getSessionFile()) return;
 		// Role changes affect the next fresh launch; session-only switches do not.
 		const initialModel = this.#initialComposerModel ?? this.session.model;
+		// Resolve from configured (base) roles: a session-only switch or preset must not leak
+		// into the next launch's prepaint.
 		const model = this.settings.getModelRole("default")
-			? (this.session.resolveRoleModelWithThinking("default").model ?? initialModel)
+			? (resolveRoleModelFull(this.settings, "default", this.session.modelRegistry.getAvailable(), initialModel)
+					.model ?? initialModel)
 			: initialModel;
 		// Recover the border's ANSI wrapper by coloring a sentinel and splitting around it.
 		const marker = "\0";

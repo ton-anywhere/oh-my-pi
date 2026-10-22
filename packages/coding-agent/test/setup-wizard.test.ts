@@ -31,6 +31,7 @@ function bindSceneHost(host: SetupApplicationSceneHost): SetupSceneHost {
 function fakeContextWithConfiguredModel(): InteractiveModeContext {
 	return {
 		session: {
+			effectiveModelRole: () => undefined,
 			modelRegistry: {
 				getAvailable: () => [{ provider: "configured", id: "model" }],
 			},
@@ -171,6 +172,7 @@ describe("setup wizard model selection", () => {
 						},
 					},
 					setModel,
+					effectiveModelRole: (role: string) => settings.getModelRole(role),
 					effectiveServiceTier: () => undefined,
 				},
 				ui: { terminal: { rows: 30 } },
@@ -370,6 +372,7 @@ describe("setup wizard short terminals", () => {
 				invalidate: () => {},
 			},
 			session: {
+				effectiveModelRole: () => undefined,
 				modelRegistry: {
 					authStorage: {
 						credentials: { has: () => false },

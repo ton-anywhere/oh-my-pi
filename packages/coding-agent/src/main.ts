@@ -58,6 +58,7 @@ import {
 	resolveModelScope,
 	type ScopedModel,
 } from "./config/model-resolver";
+import { getModelPreset } from "./config/model-presets";
 import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
 import { all, combine, type ProtocolHost, type SettingValueOf } from "./config/registry";
@@ -1398,6 +1399,9 @@ export async function buildSessionOptions(
 	if (parsed.serviceTier !== undefined) {
 		options.openAIServiceTier = serviceTierSettingToTier(parsed.serviceTier) ?? null;
 	}
+	if (parsed.preset !== undefined) {
+		options.preset = parsed.preset;
+	}
 	const cliDirs = parsed.addDir ?? [];
 	const settingsDirs = cfgWorkspaceAdditionalDirectories.get(activeSettings);
 	if (cliDirs.length > 0 || settingsDirs.length > 0) {
@@ -1470,6 +1474,33 @@ export async function buildSessionOptions(
 	// - supports --model <provider>/<pattern>
 	const modelMatchPreferences = getModelMatchPreferences(activeSettings);
 	const disabledProviders = disabledProviderIds(activeSettings);
+	const startupPreset = parsed.preset === undefined ? undefined : getModelPreset(activeSettings, parsed.preset);
+	// Explicit CLI role flags (--smol, --slow, --plan) outrank the startup
+	// preset's roles, which outrank the durable base roles.
+	const cliRoleValues: Record<string, string | undefined> = {
+		smol: parsed.smol,
+		slow: parsed.slow,
+		plan: parsed.plan,
+	};
+	const startupRoleLookup =
+		startupPreset?.kind === "found"
+			? {
+					getModelRole: (role: string) =>
+						cliRoleValues[role] ?? startupPreset.preset.modelRoles[role] ?? activeSettings.getModelRole(role),
+				}
+			: undefined;
+	// Carry the explicit CLI role flags into the session so live and deferred
+	// role resolution (not just the immediate `--model` resolution) honor them
+	// over the active preset's roles.
+	const cliRoleOverrides: Record<string, string> = {};
+	for (const [role, value] of Object.entries(cliRoleValues)) {
+		if (value !== undefined) {
+			cliRoleOverrides[role] = value;
+		}
+	}
+	if (Object.keys(cliRoleOverrides).length > 0) {
+		options.cliRoleOverrides = cliRoleOverrides;
+	}
 	// `--model` rewrites the session's `default` role below. Preserve the
 	// configured assignment so explicit prewalk role targets still resolve
 	// against the value that existed when the CLI was invoked.
@@ -1485,6 +1516,7 @@ export async function buildSessionOptions(
 			modelRegistry,
 			availableModels: modelRegistry.getAvailable(),
 			settings: activeSettings,
+			roleLookup: startupRoleLookup,
 			preferences: modelMatchPreferences,
 		});
 		if (resolved.warning) {
@@ -1527,13 +1559,14 @@ export async function buildSessionOptions(
 			}
 		}
 	} else if (scopedModels.length > 0 && !restoringSession) {
-		const remembered = activeSettings.getModelRole("default");
+		const remembered = startupRoleLookup?.getModelRole("default") ?? activeSettings.getModelRole("default");
 		if (remembered) {
 			const rememberedSpec = resolveModelRoleValue(
 				remembered,
 				scopedModels.map(scopedModel => scopedModel.model),
 				{
 					settings: activeSettings,
+					roleLookup: startupRoleLookup,
 					matchPreferences: modelMatchPreferences,
 				},
 			);
