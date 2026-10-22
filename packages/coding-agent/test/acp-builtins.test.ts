@@ -177,6 +177,7 @@ function createRuntime() {
 		messages: [],
 		model: undefined,
 		settings,
+		effectiveModelRole: (role: string) => settings.getModelRole(role),
 		getToolByName: (_name: string) => undefined,
 		async compact(_args?: string) {},
 		getContextUsage: () => undefined,
@@ -775,7 +776,7 @@ describe("ACP builtin slash commands", () => {
 		const result = await executeAcpBuiltinSlashCommand("/model claude-3-5-sonnet", runtime);
 
 		expect(result).toEqual({ consumed: true });
-		expect(setModelSpy).toHaveBeenCalledWith(available[0]);
+		expect(setModelSpy).toHaveBeenCalledWith(available[0], "default", { selector: "claude-3-5-sonnet" });
 		expect(output[0]).toContain("Model set to anthropic/claude-3-5-sonnet");
 		expect(titleNotified).toBe(1);
 		expect(configNotified).toBe(1);
