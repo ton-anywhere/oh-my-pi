@@ -376,6 +376,7 @@ import {
 	cfgDisabledExtensions,
 	cfgExtensions,
 	cfgSkills,
+	cfgSkillsCompressDescriptions,
 	type SkillsSettings,
 } from "./extensibility/settings";
 import { cfgTtsr } from "./export/ttsr-settings";
@@ -4021,22 +4022,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let advisorMemoryPrompt: string | undefined;
 		// The process agent dir uses the process-wide store; a session rooted in
 		// another agent dir keeps its own, closed when the session is disposed.
+		// As-authored sessions read no store, so an opt-out session opens no database.
+		const skillsCompressed = cfgSkillsCompressDescriptions.get(settings);
 		const ownedSkillDescriptionStore =
-			path.resolve(agentDir) === path.resolve(getAgentDir())
+			!skillsCompressed || path.resolve(agentDir) === path.resolve(getAgentDir())
 				? undefined
 				: openSessionSkillDescriptionStore(agentDir);
-		const skillDescriptions = new SkillDescriptionCatalog({
-			store: ownedSkillDescriptionStore,
-			// Like the other one-shot model calls, each compression request resolves
-			// its own telemetry handle, so its usage stays out of the run summary.
-			// The first requests can start before `agent` is constructed; they use
-			// the telemetry config and session id the agent is constructed with.
-			compress: createSkillDescriptionCompressor(modelRegistry, settings, undefined, () =>
-				agent
-					? resolveTelemetry(agent.telemetry, agent.sessionId)
-					: resolveTelemetry(options.telemetry, providerSessionId),
-			),
-		});
+		const skillDescriptions = new SkillDescriptionCatalog(
+			skillsCompressed
+				? {
+						store: ownedSkillDescriptionStore,
+						// Like the other one-shot model calls, each compression request resolves
+						// its own telemetry handle, so its usage stays out of the run summary.
+						// The first requests can start before `agent` is constructed; they use
+						// the telemetry config and session id the agent is constructed with.
+						compress: createSkillDescriptionCompressor(modelRegistry, settings, undefined, () =>
+							agent
+								? resolveTelemetry(agent.telemetry, agent.sessionId)
+								: resolveTelemetry(options.telemetry, providerSessionId),
+						),
+					}
+				: { asAuthored: true },
+		);
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
