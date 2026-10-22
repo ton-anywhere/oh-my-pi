@@ -1358,6 +1358,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				sessionManager: session.sessionManager,
 				settings: session.settings,
 				modelRegistry: session.modelRegistry,
+				effectiveModelRole: (roleName: string) => session.settings.getModelRole(roleName),
 				configWarnings: [],
 			} as unknown as TurnRecoveryHost);
 			const keys = recovery.retryFallbackChainKeys(primary);

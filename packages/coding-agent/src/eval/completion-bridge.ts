@@ -184,6 +184,7 @@ interface FallbackExpansion {
 	context: RetryFallbackResolutionContext;
 	modelRegistry: ModelRegistry;
 	settings: Settings | undefined;
+	effectiveModelRole?: (role: string) => string | undefined;
 	tier: CompletionTier;
 	disabledProviders: Set<string>;
 }
@@ -220,7 +221,12 @@ function appendFallbackCandidates(
 	for (const entry of findRetryFallbackCandidates(deps.context, chainKey, selector, model, {
 		allowMissingPrimary: true,
 	})) {
-		const resolved = resolveModelOverride([entry.raw], deps.modelRegistry, deps.settings);
+		const resolved = resolveModelOverride(
+			[entry.raw],
+			deps.modelRegistry,
+			deps.settings,
+			deps.effectiveModelRole ? { getModelRole: deps.effectiveModelRole } : undefined,
+		);
 		const candidate = resolved.model;
 		if (!candidate || deps.disabledProviders.has(candidate.provider)) continue;
 		const reasoning = reasoningForCandidate(deps.tier, candidate, entry.thinkingLevel, parent);
@@ -243,11 +249,14 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 	if (available.length === 0) return [];
 
 	const matchPreferences = getModelMatchPreferences(session.settings);
+	const roleLookup = session.getEffectiveModelRole
+		? { getModelRole: session.getEffectiveModelRole }
+		: session.settings;
 	const resolve = (
 		pattern: string | undefined,
 	): { model: Model<Api>; selector: string; configuredEffort?: ConfiguredThinkingLevel } | undefined => {
 		if (!pattern) return undefined;
-		const selector = expandRoleAlias(pattern, session.settings);
+		const selector = expandRoleAlias(pattern, roleLookup);
 		const model = resolveModelFromString(selector, available, matchPreferences);
 		if (!model) return undefined;
 		const configuredEffort =
@@ -289,11 +298,13 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 		{
 			context: {
 				chains: getRetryFallbackChains(session.settings),
-				getModelRole: (role: string) => session.settings.getModelRole(role),
+				getModelRole: (role: string) =>
+					session.getEffectiveModelRole?.(role) ?? session.settings.getModelRole(role),
 				modelLookup: modelRegistry,
 			},
 			modelRegistry,
 			settings: session.settings,
+			effectiveModelRole: session.getEffectiveModelRole,
 			tier,
 			disabledProviders: new Set(cfgDisabledProviders.get(session.settings)),
 		},

@@ -143,6 +143,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--model": (result, value) => {
 		result.model = value;
 	},
+	"--preset": (result, value) => {
+		result.preset = value;
+	},
 	"--smol": (result, value) => {
 		result.smol = value;
 	},
