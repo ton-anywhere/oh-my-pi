@@ -78,6 +78,7 @@ interface FakeAcpBuiltinSession {
 		getAll(): Array<{ provider: string; id: string; contextWindow?: number }>;
 		getAvailable(): Array<{ provider: string; id: string; contextWindow?: number }>;
 	};
+	effectiveModelRole(role: string): string | undefined;
 	setModel(model: unknown): Promise<void>;
 	setModelTemporary(model: unknown, thinkingLevel?: string): Promise<void>;
 	listResetCredits: () => Promise<ResetCreditAccountStatus[]>;

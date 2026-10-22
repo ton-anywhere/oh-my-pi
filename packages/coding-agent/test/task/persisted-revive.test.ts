@@ -235,7 +235,8 @@ function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptio
 		session: parentSession,
 		authStorage: owner.authStorage ?? ({} as never),
 		modelRegistry:
-			owner.modelRegistry ?? ({ authStorage: {}, getDiscoveryProviderId: () => undefined } as ModelRegistry),
+			owner.modelRegistry ??
+			({ authStorage: {}, getDiscoveryProviderId: () => undefined } as unknown as ModelRegistry),
 		settings: owner.settings ?? Settings.isolated(),
 		enableLsp: true,
 		eventBus,
