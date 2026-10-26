@@ -3,7 +3,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
-import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import {
 	getAgentDir,
 	getSkillDescriptionsDbPath,
@@ -14,13 +13,15 @@ import {
 	prompt,
 } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
-import { getModelMatchPreferences, parseModelPattern, resolveRoleSelection } from "../config/model-resolver";
+import { resolveRoleChain, resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import compressDescriptionPrompt from "../prompts/skills/compress-description.md" with { type: "text" };
 import { Semaphore } from "../task/parallel";
 import type { Skill } from "./skills";
 
 const MAX_PREVIEW_CHARS = 100;
+// A sentence or word cut shorter than this discards too much; cut at the budget instead.
+const MIN_PREVIEW_CUT = 40;
 const MAX_COMPRESSED_CHARS = 160;
 const MAX_COMPRESSED_WORDS = 12;
 // Leave ample room for other cleanup under postmortem's 10-second deadline.
@@ -40,8 +41,10 @@ export interface SkillDescriptionCompressor {
 class SkillDescriptionLengthError extends Error {}
 
 /**
- * Resolve the configured fast role for each background request, without using the foreground model.
- * `getTelemetry` supplies the telemetry handle for each request's chat span.
+ * Resolve the fast role for each background request the way `/models` shows it — configured `smol`,
+ * the inherited `default` when `smol` is unset, then the built-in chain — before a configured `tiny`.
+ * Never uses the session's foreground model. `getTelemetry` supplies the telemetry handle for each
+ * request's chat span.
  */
 export function createSkillDescriptionCompressor(
 	registry: ModelRegistry,
@@ -51,14 +54,10 @@ export function createSkillDescriptionCompressor(
 ): SkillDescriptionCompressor {
 	const select = (): Model<Api> | undefined => {
 		const available = registry.getAvailable();
-		const configured = resolveRoleSelection(["smol"], settings, available);
-		if (configured) return configured.model;
-		const preferences = getModelMatchPreferences(settings);
-		for (const pattern of roleDefaultModels().smol) {
-			const preferred = parseModelPattern(pattern, available, preferences).model;
-			if (preferred) return preferred;
-		}
-		return resolveRoleSelection(["tiny"], settings, available)?.model;
+		return (
+			resolveRoleChain("smol", settings, available)[0]?.model ??
+			resolveRoleSelection(["tiny"], settings, available)?.model
+		);
 	};
 	return {
 		modelKey() {
@@ -115,9 +114,11 @@ export function previewSkillDescription(description: string): string {
 	if (text.length <= MAX_PREVIEW_CHARS) return text;
 	const boundary = text.slice(0, MAX_PREVIEW_CHARS - 1);
 	const sentence = boundary.match(/^.*?[.!?](?=\s|$)/)?.[0];
-	if (sentence && sentence.length >= 40) return sentence;
-	const word = boundary.slice(0, boundary.lastIndexOf(" ")).trimEnd();
-	return `${word || boundary}…`;
+	if (sentence && sentence.length >= MIN_PREVIEW_CUT) return sentence;
+	// Space-free scripts (CJK) may hold only an early space before a Latin term.
+	const space = boundary.lastIndexOf(" ");
+	const cut = space >= MIN_PREVIEW_CUT ? boundary.slice(0, space).trimEnd() : boundary;
+	return `${cut}…`;
 }
 
 function validCompression(text: string): string | null {
@@ -323,16 +324,25 @@ export class SkillDescriptionStore {
 export class SkillDescriptionCatalog {
 	readonly #store: SkillDescriptionStore | undefined;
 	readonly #compress?: SkillDescriptionCompressor;
+	readonly #asAuthored: boolean;
 	readonly #snapshot = new Map<string, string>();
 
-	/** `store` defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep previews. */
-	constructor(options: { store?: SkillDescriptionStore; compress?: SkillDescriptionCompressor } = {}) {
-		this.#store = options.store ?? sharedSkillDescriptionStore();
+	/**
+	 * `store` defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep previews.
+	 * `asAuthored` renders descriptions exactly as written, opens no default store, and never schedules model work.
+	 */
+	constructor(
+		options: { store?: SkillDescriptionStore; compress?: SkillDescriptionCompressor; asAuthored?: boolean } = {},
+	) {
 		this.#compress = options.compress;
+		this.#asAuthored = options.asAuthored === true;
+		// As-authored sessions read no store, so don't open the shared database for them.
+		this.#store = this.#asAuthored ? undefined : (options.store ?? sharedSkillDescriptionStore());
 	}
 
 	/** Read the session's frozen prompt hints without starting new model work. */
 	snapshot(skills: readonly Skill[]): Array<Skill & { description: string }> {
+		if (this.#asAuthored) return [...skills];
 		return skills.map(skill => ({
 			...skill,
 			description: this.#snapshot.get(keyFor(skill)) ?? previewSkillDescription(skill.description),
@@ -340,7 +350,7 @@ export class SkillDescriptionCatalog {
 	}
 
 	render(skills: readonly Skill[]): Array<Skill & { description: string }> {
-		if (skills.length === 0) return [];
+		if (this.#asAuthored) return [...skills];
 		const store = this.#store;
 		return skills.map(skill => {
 			const key = keyFor(skill);
