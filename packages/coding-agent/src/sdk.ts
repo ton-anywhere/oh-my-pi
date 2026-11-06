@@ -399,6 +399,7 @@ import {
 	cfgDisabledExtensions,
 	cfgExtensions,
 	cfgSkills,
+	cfgSkillsCompressDescriptions,
 	type SkillsSettings,
 } from "./extensibility/settings";
 import { cfgTtsr } from "./export/ttsr-settings";
@@ -4189,22 +4190,27 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let advisorMemoryPrompt: string | undefined;
 		// The process agent dir uses the process-wide store; a session rooted in
 		// another agent dir keeps its own, closed when the session is disposed.
+		// As-authored sessions read no store, so an opt-out session opens no database.
+		const skillsCompressed = cfgSkillsCompressDescriptions.get(settings);
 		const ownedSkillDescriptionStore =
-			path.resolve(agentDir) === path.resolve(getAgentDir())
+			!skillsCompressed || path.resolve(agentDir) === path.resolve(getAgentDir())
 				? undefined
 				: openSessionSkillDescriptionStore(agentDir);
 		const skillDescriptions = new SkillDescriptionCatalog({
 			store: ownedSkillDescriptionStore,
+			asAuthored: !skillsCompressed,
 			// Held until AgentSession exists: before then the root cost gate does not, so a request
 			// sent from the startup prompt render could go out ungated (see `startCompression` below).
 			deferCompression: true,
-			compress: createSkillDescriptionCompressor(modelRegistry, settings, {
-				getCostGate: currentCostGate,
-				getTelemetry: () =>
-					agent
-						? resolveTelemetry(agent.telemetry, agent.sessionId)
-						: resolveTelemetry(options.telemetry, providerSessionId),
-			}),
+			compress: skillsCompressed
+				? createSkillDescriptionCompressor(modelRegistry, settings, {
+						getCostGate: currentCostGate,
+						getTelemetry: () =>
+							agent
+								? resolveTelemetry(agent.telemetry, agent.sessionId)
+								: resolveTelemetry(options.telemetry, providerSessionId),
+					})
+				: undefined,
 		});
 		// Instructions from MCP servers the host connects outside `mcpManager`
 		// (ACP client-declared servers); installed via
