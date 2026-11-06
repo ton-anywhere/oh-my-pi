@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `SessionSelectorComponent.showError()` so a host can show a retryable resume error inside the picker ([#16781](https://github.com/can1357/oh-my-pi/pull/16781) by [@ton-anywhere](https://github.com/ton-anywhere))
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes

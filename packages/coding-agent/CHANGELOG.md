@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed resuming sessions after worktree removal: usable saved primary roots are selected automatically with an old/new notice, otherwise recovery asks for an existing directory and preserves session data through cancellation, non-interactive startup, and lock failures ([#16781](https://github.com/can1357/oh-my-pi/pull/16781) by [@ton-anywhere](https://github.com/ton-anywhere))
 - Subagents receive task instructions with their blank lines, Markdown hard breaks, and table spacing intact, whether given inline or via `taskFile`.
 - Hindsight `retain` and `learn` memories are no longer lost when delivery fails or omp exits: they are kept on disk, retried, and delivered by the next session without duplicates ([#18176](https://github.com/can1357/oh-my-pi/pull/18176) by [@alphastorm](https://github.com/alphastorm))
 - Fixed the session crashing with `Native shell returned an invalid execution trace` when a bash command assigned a long value containing multi-byte characters such as Chinese text ([#18259](https://github.com/can1357/oh-my-pi/issues/18259))
