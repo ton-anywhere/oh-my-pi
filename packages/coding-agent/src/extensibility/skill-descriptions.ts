@@ -387,12 +387,14 @@ export class SkillDescriptionStore {
 export class SkillDescriptionCatalog {
 	readonly #store: SkillDescriptionStore | undefined;
 	readonly #compress?: SkillDescriptionCompressor;
+	readonly #asAuthored: boolean;
 	readonly #snapshot = new Map<string, string>();
 	/** Misses rendered before {@link startCompression}; `undefined` once compression runs. */
 	#deferred: Map<string, Skill> | undefined;
 
 	/**
 	 * `store` defaults to {@link sharedSkillDescriptionStore}; without one, prompts keep previews.
+	 * `asAuthored` renders descriptions exactly as written, opens no default store, and never schedules model work.
 	 * `deferCompression` holds model work until {@link startCompression}: until the owning session's
 	 * cost gate exists, and off a startup path (resolving the compression model composes the catalog).
 	 */
@@ -401,15 +403,19 @@ export class SkillDescriptionCatalog {
 			store?: SkillDescriptionStore;
 			compress?: SkillDescriptionCompressor;
 			deferCompression?: boolean;
+			asAuthored?: boolean;
 		} = {},
 	) {
-		this.#store = options.store ?? sharedSkillDescriptionStore();
 		this.#compress = options.compress;
+		this.#asAuthored = options.asAuthored === true;
+		// As-authored sessions read no store, so don't open the shared database for them.
+		this.#store = this.#asAuthored ? undefined : (options.store ?? sharedSkillDescriptionStore());
 		if (options.deferCompression) this.#deferred = new Map();
 	}
 
 	/** Read the session's frozen prompt hints without starting new model work. */
 	snapshot(skills: readonly Skill[]): Array<Skill & { description: string }> {
+		if (this.#asAuthored) return [...skills];
 		return skills.map(skill => ({
 			...skill,
 			description: this.#snapshot.get(keyFor(skill)) ?? previewSkillDescription(skill.description),
@@ -417,7 +423,7 @@ export class SkillDescriptionCatalog {
 	}
 
 	render(skills: readonly Skill[]): Array<Skill & { description: string }> {
-		if (skills.length === 0) return [];
+		if (this.#asAuthored) return [...skills];
 		const store = this.#store;
 		const misses = new Map<string, Skill>();
 		const rendered = skills.map(skill => {
