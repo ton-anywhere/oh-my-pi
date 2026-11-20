@@ -165,6 +165,8 @@ When no tool metadata is supplied, the prompt builder uses the presence of `read
 
 `hide: true` does not disable the skill. Hidden skills are still loaded and remain reachable through `skill://<name>` and `/skill:<name>` when skill commands are enabled.
 
+Long descriptions are background-compressed by the `smol` model into a short routing hint that is cached across sessions. `skills.compressDescriptions: false` renders every description exactly as authored and makes no background compression calls; skill discovery, hidden skills, and invocation are unaffected.
+
 Task tool subagents receive the session's discovered/provided skills list via normal session creation; there is no per-task skill pinning override.
 
 ### Interactive `/skill:<name>` commands

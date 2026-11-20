@@ -524,21 +524,25 @@ export class RoutingHintCatalog {
 
 /** Skill routing hints: one prompt/session snapshot over a {@link RoutingHintCatalog}. */
 export class SkillDescriptionCatalog {
-	readonly #hints: RoutingHintCatalog;
+	readonly #hints: RoutingHintCatalog | undefined;
 
-	constructor(options: RoutingHintCatalogOptions = {}) {
-		this.#hints = new RoutingHintCatalog(options);
+	constructor(options: RoutingHintCatalogOptions & { asAuthored?: boolean } = {}) {
+		this.#hints = options.asAuthored ? undefined : new RoutingHintCatalog(options);
 	}
 
 	/** Read the session's frozen prompt hints without starting new model work. */
 	snapshot(skills: readonly Skill[]): Array<Skill & { description: string }> {
+		const hints = this.#hints;
+		if (!hints) return [...skills];
 		return skills.map(skill => ({
 			...skill,
-			description: this.#hints.peek(keyFor(skill), previewSkillDescription(skill.description)),
+			description: hints.peek(keyFor(skill), previewSkillDescription(skill.description)),
 		}));
 	}
 
 	render(skills: readonly Skill[]): Array<Skill & { description: string }> {
+		const hints = this.#hints;
+		if (!hints) return [...skills];
 		if (skills.length === 0) return [];
 		// Authored descriptions already within the preview budget need no model
 		// compression: use them verbatim so exclusions survive. Only truly
@@ -558,22 +562,22 @@ export class SkillDescriptionCatalog {
 							prompt.render(compressDescriptionPrompt, { name: skill.name, description: skill.description }),
 					},
 		);
-		const hints = this.#hints.hints(requests.filter(request => request !== undefined));
+		const routed = hints.hints(requests.filter(request => request !== undefined));
 		let next = 0;
 		return skills.map((skill, index) => ({
 			...skill,
-			description: requests[index] ? hints[next++] : previewSkillDescription(skill.description),
+			description: requests[index] ? routed[next++] : previewSkillDescription(skill.description),
 		}));
 	}
 
 	/** Start compression held by `deferCompression`; later renders schedule theirs immediately. */
 	startCompression(): void {
-		this.#hints.startCompression();
+		this.#hints?.startCompression();
 	}
 
 	/** Await background writes already scheduled by this catalog (for shutdown or tests). */
 	waitForPending(): Promise<void> {
-		return this.#hints.waitForPending();
+		return this.#hints?.waitForPending() ?? Promise.resolve();
 	}
 }
 
