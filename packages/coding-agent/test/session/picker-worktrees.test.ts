@@ -319,7 +319,7 @@ describe.skipIf(process.platform === "win32")("resume picker across git worktree
 		const session = SessionManager.create(worktree);
 		session.appendMessage({ role: "user", content: savedMessage, timestamp: 1 });
 		session.appendMessage(makeAssistantMessage());
-		const artifactId = await session.saveArtifact(savedArtifact, "read");
+		const artifactId = await session.saveArtifact(savedArtifact);
 		const sessionPath = session.getSessionFile();
 		if (!artifactId || !sessionPath) throw new Error("expected persisted session and artifact");
 		const sessionId = session.getSessionId();

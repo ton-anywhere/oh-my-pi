@@ -138,7 +138,7 @@ async function createPersistedRecoverySession(
 	manager.appendMessage({ role: "user", content: "saved conversation", timestamp: Date.now() });
 	manager.appendMessage(makeAssistantMessage());
 	await manager.ensureOnDisk();
-	const artifactId = await manager.saveArtifact("saved artifact", "resume-test");
+	const artifactId = await manager.saveArtifact("saved artifact");
 	if (!artifactId) throw new Error("Expected a saved recovery artifact");
 	const sessionPath = manager.getSessionFile();
 	if (!sessionPath) throw new Error("Expected a persisted recovery session");
