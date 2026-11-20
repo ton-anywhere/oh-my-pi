@@ -445,6 +445,7 @@ import {
 	cfgDisabledExtensions,
 	cfgExtensions,
 	cfgSkills,
+	cfgSkillsCompressDescriptions,
 	type SkillsSettings,
 } from "./extensibility/settings";
 import { cfgTtsr } from "./export/ttsr-settings";
@@ -4415,6 +4416,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let advisorMemoryPrompt: string | undefined;
 		// The process agent dir uses the process-wide store; a session rooted in
 		// another agent dir keeps its own, closed when the session is disposed.
+		// MCP namespace hints also use this store, so it is not gated by the skill setting.
+		const skillsCompressed = cfgSkillsCompressDescriptions.get(settings);
 		const ownedSkillDescriptionStore =
 			path.resolve(agentDir) === path.resolve(getAgentDir())
 				? undefined
@@ -4431,10 +4434,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const hintLock = (job: string) => daemonMutex("routing-hints").lock(job);
 		const skillDescriptions = new SkillDescriptionCatalog({
 			store: ownedSkillDescriptionStore,
+			asAuthored: !skillsCompressed,
 			// Held until AgentSession exists: before then the root cost gate does not, so a request
 			// sent from the startup prompt render could go out ungated (see `startCompression` below).
 			deferCompression: true,
-			compress: createSkillDescriptionCompressor(modelRegistry, settings, hintCompressorOptions),
+			compress: skillsCompressed
+				? createSkillDescriptionCompressor(modelRegistry, settings, hintCompressorOptions)
+				: undefined,
 			lock: hintLock,
 		});
 		mcpNamespaces = new MCPEvalNamespaceCatalog({
